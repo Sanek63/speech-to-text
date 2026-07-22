@@ -13,6 +13,8 @@
   --other-bg: #f0f0f2;
   --error: #d64545;
   --error-bg: #fdecec;
+  --queued: #b8860b;
+  --queued-bg: #fbf3e0;
   --radius: 10px;
 }
 
@@ -27,6 +29,7 @@
     --student-bg: #123526;
     --other-bg: #232329;
     --error-bg: #3a1e1e;
+    --queued-bg: #362b12;
   }
 }
 
@@ -110,19 +113,6 @@ input[type="file"] {
   display: none !important;
 }
 
-.progress-panel {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
-  padding: 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
 .spinner {
   width: 18px;
   height: 18px;
@@ -132,8 +122,115 @@ input[type="file"] {
   animation: spin 0.8s linear infinite;
 }
 
+.spinner-sm {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 0.35rem;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.jobs-panel {
+  margin-top: 1.5rem;
+}
+
+.jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.jobs-empty {
+  padding: 1rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.job-row.clickable {
+  cursor: pointer;
+}
+
+.job-row.clickable:hover {
+  border-color: var(--accent);
+}
+
+.job-row.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.job-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.job-filename {
+  font-size: 0.92rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22rem;
+}
+
+.job-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.job-error-text {
+  flex: 1 1 100%;
+  font-size: 0.8rem;
+  color: var(--error);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge.job-status-badge {
+  white-space: nowrap;
+}
+
+.status-uploaded { color: var(--other); background: var(--other-bg); }
+.status-queued { color: var(--queued); background: var(--queued-bg); }
+.status-processing { color: var(--teacher); background: var(--teacher-bg); }
+.status-done { color: var(--student); background: var(--student-bg); }
+.status-error { color: var(--error); background: var(--error-bg); }
+
+.jobs-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.jobs-pagination button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
 }
 
 .result-panel {
@@ -203,7 +300,7 @@ input[type="file"] {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-.turn .badge {
+.badge {
   flex: 0 0 auto;
   align-self: flex-start;
   font-size: 0.72rem;

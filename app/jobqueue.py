@@ -7,7 +7,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 QUEUE_KEY = "speech:jobs:queue"
 PROCESSING_KEY = "speech:jobs:processing"
 
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))  # 500MB — не даём одному файлу забить диск
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 1024)))  # 4GB — видео-лекции тяжелее чистого аудио, но одному файлу всё ещё не даём забить диск
 
 
 # --- Синхронный клиент — для воркера -----------------------------------------

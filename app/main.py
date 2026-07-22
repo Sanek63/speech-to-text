@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import psycopg.rows
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg_pool import AsyncConnectionPool
@@ -86,9 +86,16 @@ async def upload(request: Request, file: UploadFile = File(...)):
         raise
 
     async with app.state.db_pool.connection() as conn:
-        await db.async_create_job(conn, file_id, client_ip)
+        await db.async_create_job(conn, file_id, client_ip, file.filename or dest.name)
 
     return {"file_id": file_id}
+
+
+@app.get("/api/jobs")
+async def list_jobs(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)):
+    async with app.state.db_pool.connection() as conn:
+        jobs, total = await db.async_list_jobs(conn, limit, offset)
+    return {"jobs": jobs, "total": total}
 
 
 @app.post("/api/transcribe/{file_id}")

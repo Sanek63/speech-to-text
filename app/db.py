@@ -91,10 +91,12 @@ async def async_init_schema(conn: psycopg.AsyncConnection) -> None:
     await conn.execute(SCHEMA)
 
 
-async def async_create_job(conn: psycopg.AsyncConnection, file_id: str, client_ip: str) -> None:
+async def async_create_job(
+    conn: psycopg.AsyncConnection, file_id: str, client_ip: str, audio_filename: str
+) -> None:
     await conn.execute(
-        "INSERT INTO jobs (file_id, status, client_ip) VALUES (%s, 'uploaded', %s)",
-        (file_id, client_ip),
+        "INSERT INTO jobs (file_id, status, client_ip, audio_filename) VALUES (%s, 'uploaded', %s, %s)",
+        (file_id, client_ip, audio_filename),
     )
 
 
@@ -111,3 +113,19 @@ async def async_get_job(conn: psycopg.AsyncConnection, file_id: str) -> dict | N
     cur = await conn.execute("SELECT * FROM jobs WHERE file_id = %s", (file_id,))
     row = await cur.fetchone()
     return _row_to_dict(row) if row else None
+
+
+async def async_list_jobs(
+    conn: psycopg.AsyncConnection, limit: int = 10, offset: int = 0
+) -> tuple[list[dict], int]:
+    """Список задач для истории в UI — без тяжёлого transcript и без client_ip (наружу не
+    отдаём). Свежие сверху, вся история видна всем — сервис открытый, без авторизации."""
+    cur = await conn.execute(
+        "SELECT file_id, status, stage, error, audio_filename, language, metrics, "
+        "created_at, updated_at FROM jobs ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (limit, offset),
+    )
+    rows = await cur.fetchall()
+    count_cur = await conn.execute("SELECT COUNT(*) AS n FROM jobs")
+    total_row = await count_cur.fetchone()
+    return [_row_to_dict(r) for r in rows], total_row["n"]

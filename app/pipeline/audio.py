@@ -18,7 +18,7 @@ def preprocess_audio(input_path: Path, cache_dir: Path) -> Path:
         return out_path
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
-        "-ac", "1", "-ar", "16000", "-af", "loudnorm",
+        "-vn", "-ac", "1", "-ar", "16000", "-af", "loudnorm",
         str(out_path),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)

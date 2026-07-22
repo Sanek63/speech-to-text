@@ -1,11 +1,12 @@
 const fileInput = document.getElementById("file-input");
 const uploadBtn = document.getElementById("upload-btn");
-const transcribeBtn = document.getElementById("transcribe-btn");
 const uploadStatus = document.getElementById("upload-status");
 const uploadProgress = document.getElementById("upload-progress");
 const uploadProgressBar = document.getElementById("upload-progress-bar");
-const progressPanel = document.getElementById("progress-panel");
-const progressText = document.getElementById("progress-text");
+const jobsListEl = document.getElementById("jobs-list");
+const jobsPrevBtn = document.getElementById("jobs-prev");
+const jobsNextBtn = document.getElementById("jobs-next");
+const jobsPageInfo = document.getElementById("jobs-page-info");
 const resultPanel = document.getElementById("result-panel");
 const player = document.getElementById("player");
 const metricsEl = document.getElementById("metrics");
@@ -19,10 +20,19 @@ const STAGE_LABELS = {
   postprocess: "Роли и экспорт...",
 };
 
-const STORAGE_KEY = "speech-to-text:file_id";
+const STATUS_LABELS = {
+  uploaded: "Загружено",
+  queued: "В очереди",
+  done: "Готово",
+  error: "Ошибка",
+};
 
-let fileId = null;
-let pollTimer = null;
+const JOBS_PAGE_SIZE = 10;
+
+let jobsPage = 0;
+let jobsTotal = 0;
+let jobsPollTimer = null;
+let selectedFileId = null;
 let turns = [];
 
 function showError(message) {
@@ -35,42 +45,27 @@ function clearError() {
   errorPanel.textContent = "";
 }
 
-function saveJobState(id) {
-  localStorage.setItem(STORAGE_KEY, id);
+function jobStatusLabel(job) {
+  if (job.status === "processing") return STAGE_LABELS[job.stage] || "Обработка...";
+  return STATUS_LABELS[job.status] || job.status;
 }
 
-// Восстанавливаем незавершённую (или уже готовую) задачу после перезагрузки вкладки —
-// сервер (Postgres) остаётся единственным источником истины о статусе, localStorage хранит
-// только "какой file_id проверить", ничего не додумывает сам.
-async function resumeJobIfAny() {
-  const savedId = localStorage.getItem(STORAGE_KEY);
-  if (!savedId) return;
-
-  try {
-    const res = await fetch(`/api/status/${savedId}`);
-    if (!res.ok) {
-      localStorage.removeItem(STORAGE_KEY);
-      return;
-    }
-    const st = await res.json();
-    fileId = savedId;
-    uploadStatus.textContent = `Восстановлено (id: ${fileId.slice(0, 8)}...)`;
-    transcribeBtn.disabled = false;
-
-    if (st.status === "done") {
-      await showResult(st.metrics);
-    } else if (st.status === "error") {
-      showError(st.error || "Неизвестная ошибка обработки");
-    } else if (st.status === "queued" || st.status === "processing") {
-      transcribeBtn.disabled = true;
-      progressPanel.classList.remove("hidden");
-      progressText.textContent = STAGE_LABELS[st.stage] || `Статус: ${st.status}...`;
-      pollStatus();
-    }
-  } catch (e) {
-    // страница открылась без сети/бекенда — просто не восстанавливаем, не критично
-  }
+function formatTimestamp(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
 }
+
+function formatSeconds(sec) {
+  if (sec == null) return "-";
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return m > 0 ? `${m}м ${s}с` : `${s}с`;
+}
+
+// --- Загрузка файла (XHR, не fetch — только у XHR есть событие прогресса отправки) --------
 
 uploadBtn.addEventListener("click", () => {
   clearError();
@@ -87,8 +82,6 @@ uploadBtn.addEventListener("click", () => {
   const form = new FormData();
   form.append("file", file);
 
-  // XHR, не fetch — только у XHR есть событие прогресса именно отправки (upload.progress),
-  // что и нужно для полосы прогресса при загрузке большого файла.
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/upload");
 
@@ -103,11 +96,10 @@ uploadBtn.addEventListener("click", () => {
     uploadBtn.disabled = false;
     uploadProgress.classList.add("hidden");
     if (xhr.status >= 200 && xhr.status < 300) {
-      const data = JSON.parse(xhr.responseText);
-      fileId = data.file_id;
-      saveJobState(fileId);
-      uploadStatus.textContent = `Загружено (id: ${fileId.slice(0, 8)}...)`;
-      transcribeBtn.disabled = false;
+      uploadStatus.textContent = "Загружено";
+      fileInput.value = ""; // сразу можно выбрать следующий файл
+      jobsPage = 0; // новая задача — самая свежая, всегда на первой странице
+      loadJobsList();
     } else {
       let message = `Upload failed: ${xhr.status}`;
       try {
@@ -129,69 +121,163 @@ uploadBtn.addEventListener("click", () => {
   xhr.send(form);
 });
 
-transcribeBtn.addEventListener("click", async () => {
-  if (!fileId) return;
-  clearError();
-  resultPanel.classList.add("hidden");
-  transcribeBtn.disabled = true;
+// --- Список задач (пагинация + автообновление статусов) -----------------------------------
 
+async function loadJobsList() {
+  const offset = jobsPage * JOBS_PAGE_SIZE;
+  try {
+    const res = await fetch(`/api/jobs?limit=${JOBS_PAGE_SIZE}&offset=${offset}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    jobsTotal = data.total;
+    renderJobsList(data.jobs);
+    updatePaginationControls();
+  } catch (e) {
+    // сеть/бекенд временно недоступны — молча пробуем на следующем тике опроса
+  }
+}
+
+function renderJobsList(jobs) {
+  jobsListEl.innerHTML = "";
+  if (jobs.length === 0) {
+    jobsListEl.innerHTML = `<div class="jobs-empty">Пока нет загруженных файлов</div>`;
+    return;
+  }
+  for (const job of jobs) {
+    jobsListEl.appendChild(renderJobRow(job));
+  }
+}
+
+function renderJobRow(job) {
+  const row = document.createElement("div");
+  row.className = "job-row";
+  row.dataset.fileId = job.file_id;
+
+  const main = document.createElement("div");
+  main.className = "job-main";
+
+  const name = document.createElement("span");
+  name.className = "job-filename";
+  name.textContent = job.audio_filename || `${job.file_id.slice(0, 8)}...`;
+  main.appendChild(name);
+
+  const badge = document.createElement("span");
+  badge.className = `badge job-status-badge status-${job.status}`;
+  if (job.status === "processing") {
+    const spinner = document.createElement("span");
+    spinner.className = "spinner-sm";
+    badge.appendChild(spinner);
+  }
+  badge.appendChild(document.createTextNode(jobStatusLabel(job)));
+  main.appendChild(badge);
+
+  if (job.status === "done" && job.metrics) {
+    const summary = document.createElement("span");
+    summary.className = "status-text";
+    summary.textContent = `${formatSeconds(job.metrics.audio_duration_sec)} · RTF ${job.metrics.total_rtf.toFixed(3)}`;
+    main.appendChild(summary);
+  }
+
+  row.appendChild(main);
+
+  const meta = document.createElement("div");
+  meta.className = "job-meta";
+
+  const time = document.createElement("span");
+  time.className = "status-text";
+  time.textContent = formatTimestamp(job.created_at);
+  meta.appendChild(time);
+
+  if (job.status === "uploaded" || job.status === "error") {
+    const btn = document.createElement("button");
+    btn.textContent = job.status === "error" ? "Повторить" : "Транскрибировать";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startTranscribe(job.file_id, btn);
+    });
+    meta.appendChild(btn);
+  }
+
+  row.appendChild(meta);
+
+  if (job.status === "error" && job.error) {
+    const errText = document.createElement("div");
+    errText.className = "job-error-text";
+    errText.textContent = job.error.split("\n")[0];
+    errText.title = job.error;
+    row.appendChild(errText);
+  }
+
+  if (job.status === "done") {
+    row.classList.add("clickable");
+    row.addEventListener("click", () => openJobDetail(job));
+    if (job.file_id === selectedFileId) row.classList.add("active");
+  }
+
+  return row;
+}
+
+async function startTranscribe(fileId, btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  clearError();
   try {
     const res = await fetch(`/api/transcribe/${fileId}`, { method: "POST" });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.detail || `Transcribe failed: ${res.status}`);
     }
-    progressPanel.classList.remove("hidden");
-    pollStatus();
+    await loadJobsList();
   } catch (e) {
     showError(String(e));
-    transcribeBtn.disabled = false;
+    if (btnEl) btnEl.disabled = false;
   }
-});
-
-function pollStatus() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    try {
-      const res = await fetch(`/api/status/${fileId}`);
-      const st = await res.json();
-
-      if (st.status === "error") {
-        progressPanel.classList.add("hidden");
-        showError(st.error || "Неизвестная ошибка обработки");
-        transcribeBtn.disabled = false;
-        return;
-      }
-
-      if (st.status === "done") {
-        progressPanel.classList.add("hidden");
-        transcribeBtn.disabled = false;
-        await showResult(st.metrics);
-        return;
-      }
-
-      progressText.textContent = STAGE_LABELS[st.stage] || `Статус: ${st.status}...`;
-      pollStatus();
-    } catch (e) {
-      showError(String(e));
-      transcribeBtn.disabled = false;
-    }
-  }, 2000);
 }
 
-async function showResult(metrics) {
-  const res = await fetch(`/api/transcript/${fileId}`);
-  if (!res.ok) {
-    showError("Не удалось загрузить транскрипт");
-    return;
-  }
-  const data = await res.json();
-  turns = data.turns || [];
+function updatePaginationControls() {
+  const totalPages = Math.max(1, Math.ceil(jobsTotal / JOBS_PAGE_SIZE));
+  jobsPageInfo.textContent = `Страница ${jobsPage + 1} из ${totalPages} (всего ${jobsTotal})`;
+  jobsPrevBtn.disabled = jobsPage === 0;
+  jobsNextBtn.disabled = jobsPage + 1 >= totalPages;
+}
 
-  player.src = `/api/audio/${fileId}`;
-  renderMetrics(metrics);
-  renderTranscript();
-  resultPanel.classList.remove("hidden");
+jobsPrevBtn.addEventListener("click", () => {
+  if (jobsPage === 0) return;
+  jobsPage--;
+  loadJobsList();
+});
+
+jobsNextBtn.addEventListener("click", () => {
+  jobsPage++;
+  loadJobsList();
+});
+
+function startJobsPolling() {
+  if (jobsPollTimer) clearInterval(jobsPollTimer);
+  jobsPollTimer = setInterval(loadJobsList, 3000);
+}
+
+// --- Детали готовой задачи: плеер + метрики + транскрипт --------------------------------
+
+async function openJobDetail(job) {
+  clearError();
+  try {
+    const res = await fetch(`/api/transcript/${job.file_id}`);
+    if (!res.ok) {
+      showError("Не удалось загрузить транскрипт");
+      return;
+    }
+    const data = await res.json();
+    turns = data.turns || [];
+    selectedFileId = job.file_id;
+
+    player.src = `/api/audio/${job.file_id}`;
+    renderMetrics(job.metrics);
+    renderTranscript();
+    resultPanel.classList.remove("hidden");
+    resultPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    showError(String(e));
+  }
 }
 
 function renderMetrics(metrics) {
@@ -210,13 +296,6 @@ function renderMetrics(metrics) {
     tile.innerHTML = `<div class="value">${formatSeconds(sec)}</div><div class="label">${label} · RTF ${rtf.toFixed(3)}</div>`;
     metricsEl.appendChild(tile);
   }
-}
-
-function formatSeconds(sec) {
-  if (sec == null) return "-";
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
-  return m > 0 ? `${m}м ${s}с` : `${s}с`;
 }
 
 function roleClass(role) {
@@ -281,4 +360,5 @@ player.addEventListener("timeupdate", () => {
   }
 });
 
-resumeJobIfAny();
+loadJobsList();
+startJobsPolling();

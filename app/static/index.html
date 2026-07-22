@@ -13,16 +13,19 @@
     <section class="upload-panel">
       <input type="file" id="file-input" accept="audio/*,video/*">
       <button id="upload-btn">Загрузить</button>
-      <button id="transcribe-btn" disabled>Транскрибировать</button>
       <span id="upload-status" class="status-text"></span>
       <div id="upload-progress" class="upload-progress hidden">
         <div id="upload-progress-bar" class="upload-progress-bar"></div>
       </div>
     </section>
 
-    <section id="progress-panel" class="progress-panel hidden">
-      <div class="spinner"></div>
-      <span id="progress-text">Обработка...</span>
+    <section class="jobs-panel">
+      <div id="jobs-list" class="jobs-list"></div>
+      <div class="jobs-pagination">
+        <button id="jobs-prev" disabled>&larr; Назад</button>
+        <span id="jobs-page-info" class="status-text"></span>
+        <button id="jobs-next" disabled>Вперёд &rarr;</button>
+      </div>
     </section>
 
     <section id="result-panel" class="result-panel hidden">

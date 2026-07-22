@@ -1,8 +1,7 @@
 services:
   backend:
     build: .
-    ports:
-      - "11111:8000"
+    network_mode: host  # bridge/NAT не мог достучаться до Azure CDN (ENETUNREACH) — host обходит его полностью
     volumes:
       - ./data:/app/data
       - model-cache:/root/.cache

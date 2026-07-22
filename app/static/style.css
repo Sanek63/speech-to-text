@@ -213,6 +213,35 @@ input[type="file"] {
   white-space: nowrap;
 }
 
+.job-elapsed {
+  opacity: 0.85;
+}
+
+.job-progress {
+  flex: 1 1 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.job-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.job-progress.indeterminate .job-progress-bar {
+  width: 40%;
+  animation: job-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes job-progress-slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
 .status-uploaded { color: var(--other); background: var(--other-bg); }
 .status-queued { color: var(--queued); background: var(--queued-bg); }
 .status-processing { color: var(--teacher); background: var(--teacher-bg); }

@@ -52,15 +52,23 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     original = next(d.glob("original.*"))
 
     print(f"[worker] [{file_id}] препроцессинг аудио...", flush=True)
-    db.sync_set_status(conn, file_id, status="processing", stage="preprocess")
+    db.sync_set_status(conn, file_id, status="processing", stage="preprocess", progress=None)
     t0 = time.time()
-    wav_path = pipeline.preprocess_audio(original, d)
+
+    def _report_preprocess_progress(pct: float) -> None:
+        # прогресс -- не более чем удобство для UI, не должен уронить обработку задачи
+        try:
+            db.sync_set_status(conn, file_id, stage="preprocess", progress=round(pct, 1))
+        except Exception as e:
+            print(f"[worker] [{file_id}] не удалось записать прогресс препроцессинга: {e}", flush=True)
+
+    wav_path = pipeline.preprocess_audio(original, d, on_progress=_report_preprocess_progress)
     duration = pipeline.get_audio_duration(wav_path)
     preprocess_time = time.time() - t0
     print(f"[worker] [{file_id}] длительность аудио {duration:.0f}с, препроцессинг за {preprocess_time:.1f}с", flush=True)
 
     print(f"[worker] [{file_id}] ASR (Whisper {WHISPER_MODEL})...", flush=True)
-    db.sync_set_status(conn, file_id, status="processing", stage="asr")
+    db.sync_set_status(conn, file_id, status="processing", stage="asr", progress=None)
     t0 = time.time()
     if duration > CHUNK_THRESHOLD_SEC:
         chunks = pipeline.split_audio_on_silence(wav_path, d, CHUNK_TARGET_SEC, CHUNK_MAX_SEC)

@@ -3,10 +3,14 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-def preprocess_audio(input_path: Path, cache_dir: Path) -> Path:
+def preprocess_audio(input_path: Path, cache_dir: Path, on_progress=None) -> Path:
     """
     ffmpeg: любой вход -> 16kHz mono WAV с loudness-нормализацией.
+    on_progress(pct: float), если передан, вызывается по ходу обработки с процентом
+    (0..100) — парсим потоковый `ffmpeg -progress pipe:1`, а не просто блокируемся на
+    subprocess.run() до самого конца.
     """
+    import re
     import shutil
 
     if shutil.which("ffmpeg") is None:
@@ -16,14 +20,34 @@ def preprocess_audio(input_path: Path, cache_dir: Path) -> Path:
     out_path = cache_dir / "audio_16k_mono.wav"
     if out_path.exists():
         return out_path
+
+    input_duration = get_audio_duration(input_path) if on_progress else 0.0
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-vn", "-ac", "1", "-ar", "16000", "-af", "loudnorm",
+        "-progress", "pipe:1", "-nostats",
         str(out_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg упал (код {proc.returncode}). stderr:\n{proc.stderr[-3000:]}")
+    # stderr вливаем в тот же stdout-поток, что и читаем построчно — иначе при большом
+    # объёме обычных ffmpeg-логов в stderr есть риск классического deadlock'а (процесс
+    # блокируется на записи в переполненный pipe, пока мы читаем только stdout).
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    tail_lines: list[str] = []
+    for line in proc.stdout:
+        tail_lines.append(line)
+        if len(tail_lines) > 200:
+            tail_lines.pop(0)
+        if on_progress and input_duration > 0:
+            m = re.match(r"out_time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+            if m:
+                h, mi, s = m.groups()
+                elapsed = int(h) * 3600 + int(mi) * 60 + float(s)
+                on_progress(min(100.0, elapsed / input_duration * 100))
+    returncode = proc.wait()
+    if returncode != 0:
+        raise RuntimeError(f"ffmpeg упал (код {returncode}). вывод:\n{''.join(tail_lines)[-3000:]}")
+    if on_progress:
+        on_progress(100.0)
     return out_path
 
 

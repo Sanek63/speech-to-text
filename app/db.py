@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     file_id UUID PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'uploaded',
     stage TEXT,
+    progress REAL,
     error TEXT,
     audio_filename TEXT,
     language TEXT,
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS progress REAL;
 """
 
 
@@ -121,7 +123,7 @@ async def async_list_jobs(
     """Список задач для истории в UI — без тяжёлого transcript и без client_ip (наружу не
     отдаём). Свежие сверху, вся история видна всем — сервис открытый, без авторизации."""
     cur = await conn.execute(
-        "SELECT file_id, status, stage, error, audio_filename, language, metrics, "
+        "SELECT file_id, status, stage, progress, error, audio_filename, language, metrics, "
         "created_at, updated_at FROM jobs ORDER BY created_at DESC LIMIT %s OFFSET %s",
         (limit, offset),
     )

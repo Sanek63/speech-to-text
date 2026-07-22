@@ -46,7 +46,13 @@ function clearError() {
 }
 
 function jobStatusLabel(job) {
-  if (job.status === "processing") return STAGE_LABELS[job.stage] || "Обработка...";
+  if (job.status === "processing") {
+    const label = STAGE_LABELS[job.stage] || "Обработка...";
+    if (job.stage === "preprocess" && job.progress != null) {
+      return `${label} ${Math.round(job.progress)}%`;
+    }
+    return label;
+  }
   return STATUS_LABELS[job.status] || job.status;
 }
 
@@ -146,7 +152,24 @@ function renderJobsList(jobs) {
   for (const job of jobs) {
     jobsListEl.appendChild(renderJobRow(job));
   }
+  tickElapsedTimers();
 }
+
+// Для asr/diarization точный процент честно недоступен без хрупких хаков во внутренности
+// Whisper/NeMo — вместо фейковых цифр просто тикаем "сколько времени прошло" от
+// updated_at (момент начала этапа), между 3-секундными опросами списка, чтобы было видно,
+// что ничего не зависло, без лишних запросов к бекенду.
+function tickElapsedTimers() {
+  document.querySelectorAll(".job-row[data-stage-started-at]").forEach((row) => {
+    const started = new Date(row.dataset.stageStartedAt).getTime();
+    if (Number.isNaN(started)) return;
+    const elapsedSec = Math.max(0, (Date.now() - started) / 1000);
+    const el = row.querySelector(".job-elapsed");
+    if (el) el.textContent = formatSeconds(elapsedSec);
+  });
+}
+
+setInterval(tickElapsedTimers, 1000);
 
 function renderJobRow(job) {
   const row = document.createElement("div");
@@ -169,6 +192,15 @@ function renderJobRow(job) {
     badge.appendChild(spinner);
   }
   badge.appendChild(document.createTextNode(jobStatusLabel(job)));
+
+  const isTimedStage = job.status === "processing" && (job.stage === "asr" || job.stage === "diarization");
+  if (isTimedStage) {
+    badge.appendChild(document.createTextNode(" "));
+    const elapsed = document.createElement("span");
+    elapsed.className = "job-elapsed";
+    badge.appendChild(elapsed);
+    row.dataset.stageStartedAt = job.updated_at;
+  }
   main.appendChild(badge);
 
   if (job.status === "done" && job.metrics) {
@@ -179,6 +211,23 @@ function renderJobRow(job) {
   }
 
   row.appendChild(main);
+
+  if (job.status === "processing" && job.stage === "preprocess" && job.progress != null) {
+    const track = document.createElement("div");
+    track.className = "job-progress";
+    const bar = document.createElement("div");
+    bar.className = "job-progress-bar";
+    bar.style.width = `${job.progress}%`;
+    track.appendChild(bar);
+    row.appendChild(track);
+  } else if (isTimedStage) {
+    const track = document.createElement("div");
+    track.className = "job-progress indeterminate";
+    const bar = document.createElement("div");
+    bar.className = "job-progress-bar";
+    track.appendChild(bar);
+    row.appendChild(track);
+  }
 
   const meta = document.createElement("div");
   meta.className = "job-meta";

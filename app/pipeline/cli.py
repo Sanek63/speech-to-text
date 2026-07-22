@@ -2,7 +2,7 @@
 """
 CLI поверх пакета pipeline — поведение то же, что раньше было в pipeline_nemo.py.
 
-    python -m pipeline.cli tmp/audio.mp3 --reference tmp/script.pdf
+    python -m pipeline.cli audio/audio.mp3 --reference audio/script.pdf
 """
 import argparse
 import json

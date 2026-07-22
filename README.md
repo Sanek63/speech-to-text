@@ -174,6 +174,8 @@ docker-compose up --build
 
 API: `POST /api/upload` (файл → `file_id`) → `POST /api/transcribe/{file_id}` (ставит в очередь) → опрос `GET /api/status/{file_id}` (стадия/RTF-метрики) → `GET /api/transcript/{file_id}`. ASR и диаризация внутри одной задачи никогда не выполняются параллельно (см. "Жизненный цикл моделей" в коде `app/main.py`) — на одной GPU-карте это уже приводило к OOM; несколько задач при этом можно ставить в очередь одновременно, не блокируя загрузку/опрос статуса.
 
+**Воркер — отдельный OS-процесс, не таск в event loop'е API.** Whisper/NeMo — нативный CUDA-код: жёсткий крах там (segfault, зависший драйвер, OOM-kill) не ловится Python-исключением и уронил бы весь uvicorn целиком. Поэтому весь инференс (`worker_main` в `main.py`) живёт в дочернем процессе (`multiprocessing`, `spawn` — CUDA не fork-safe), общаясь с API-процессом через очередь задач и `status.json` на диске. Watchdog в API-процессе следит за `is_alive()`: если воркер упал — зависшая задача помечается `error`, воркер поднимается заново, API/UI не прерываются.
+
 ## Формат вывода
 
 Три формата из общей структуры `Turn(speaker, role, start, end, text, words)`:

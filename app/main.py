@@ -1,6 +1,8 @@
 import asyncio
 import json
+import multiprocessing
 import os
+import queue
 import time
 import traceback
 import uuid
@@ -22,6 +24,10 @@ LANGUAGE = os.environ.get("LANGUAGE", "ru")
 CHUNK_THRESHOLD_SEC = 45 * 60  # длиннее — включаем чанкование ASR автоматически
 CHUNK_TARGET_SEC = 600
 CHUNK_MAX_SEC = 720
+WATCHDOG_INTERVAL_SEC = 3
+WORKER_READY_POLL_SEC = 5
+
+MP_CTX = multiprocessing.get_context("spawn")  # CUDA-контексты не fork-safe
 
 
 def job_dir(file_id: str) -> Path:
@@ -43,57 +49,53 @@ def load_status(file_id: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-async def worker(app: FastAPI) -> None:
-    while True:
-        file_id = await app.state.queue.get()
-        try:
-            await process_job(app, file_id)
-        except Exception as e:
-            set_status(file_id, status="error", stage=None, error=f"{e}\n{traceback.format_exc()[-2000:]}")
-        finally:
-            app.state.queue.task_done()
+# --- Воркер-процесс: инференс, никогда не касается FastAPI ------------------
+#
+# NeMo/Whisper — нативный CUDA-код. Жёсткий крах там (segfault, зависший драйвер,
+# OOM-kill от cgroup) try/except в Python не ловит, потому что это гибель процесса,
+# а не исключение. Поэтому весь инференс живёт в отдельном OS-процессе: крах там
+# роняет только его, API и UI продолжают отвечать (см. watchdog ниже).
 
 
-def _run_asr(app: FastAPI, wav_path: Path) -> dict:
-    pipeline.move_model(app.state.whisper_model, app.state.device)
+def _run_asr(model, device: str, wav_path: Path) -> dict:
+    pipeline.move_model(model, device)
     try:
-        return pipeline.transcribe_with_model(app.state.whisper_model, wav_path, LANGUAGE)
+        return pipeline.transcribe_with_model(model, wav_path, LANGUAGE)
     finally:
-        pipeline.move_model(app.state.whisper_model, "cpu")
+        pipeline.move_model(model, "cpu")
 
 
-def _run_asr_chunked(app: FastAPI, chunks) -> dict:
-    pipeline.move_model(app.state.whisper_model, app.state.device)
+def _run_asr_chunked(model, device: str, chunks) -> dict:
+    pipeline.move_model(model, device)
     try:
-        return pipeline.transcribe_chunked(app.state.whisper_model, chunks, LANGUAGE)
+        return pipeline.transcribe_chunked(model, chunks, LANGUAGE)
     finally:
-        pipeline.move_model(app.state.whisper_model, "cpu")
+        pipeline.move_model(model, "cpu")
 
 
-async def process_job(app: FastAPI, file_id: str) -> None:
+def process_job(model, device: str, file_id: str) -> None:
+    """Синхронная версия — выполняется целиком внутри воркер-процесса."""
     d = job_dir(file_id)
     original = next(d.glob("original.*"))
 
     set_status(file_id, status="processing", stage="preprocess")
     t0 = time.time()
-    wav_path = await asyncio.to_thread(pipeline.preprocess_audio, original, d)
-    duration = await asyncio.to_thread(pipeline.get_audio_duration, wav_path)
+    wav_path = pipeline.preprocess_audio(original, d)
+    duration = pipeline.get_audio_duration(wav_path)
     preprocess_time = time.time() - t0
 
     set_status(file_id, status="processing", stage="asr")
     t0 = time.time()
     if duration > CHUNK_THRESHOLD_SEC:
-        chunks = await asyncio.to_thread(
-            pipeline.split_audio_on_silence, wav_path, d, CHUNK_TARGET_SEC, CHUNK_MAX_SEC
-        )
-        result = await asyncio.to_thread(_run_asr_chunked, app, chunks)
+        chunks = pipeline.split_audio_on_silence(wav_path, d, CHUNK_TARGET_SEC, CHUNK_MAX_SEC)
+        result = _run_asr_chunked(model, device, chunks)
     else:
-        result = await asyncio.to_thread(_run_asr, app, wav_path)
+        result = _run_asr(model, device, wav_path)
     asr_time = time.time() - t0
 
     set_status(file_id, status="processing", stage="diarization")
     t0 = time.time()
-    diarization = await asyncio.to_thread(pipeline.diarize_nemo, wav_path, d, app.state.device)
+    diarization = pipeline.diarize_nemo(wav_path, d, device)
     diarization_time = time.time() - t0
 
     set_status(file_id, status="processing", stage="postprocess")
@@ -124,29 +126,97 @@ async def process_job(app: FastAPI, file_id: str) -> None:
     set_status(file_id, status="done", stage=None, metrics=metrics)
 
 
+def worker_main(job_queue: multiprocessing.Queue, ready_queue: multiprocessing.Queue, device: str) -> None:
+    """Точка входа дочернего процесса: грузит модели один раз, держит резидентно, обрабатывает
+    задачи по одной. Ошибки внутри одной задачи ловятся и не убивают цикл — а вот жёсткий крах
+    нативного кода (то, что try/except не поймает) убьёт только этот процесс, см. watchdog."""
+    print(f"[worker] device: {device}", flush=True)
+    print("[worker] loading Whisper...", flush=True)
+    model = pipeline.load_whisper_model(WHISPER_MODEL, "cpu")
+
+    print("[worker] warming up NeMo (форсируем скачивание весов сразу)...", flush=True)
+    warmup_dir = DATA_DIR / "_warmup"
+    warmup_dir.mkdir(parents=True, exist_ok=True)
+    silence_wav = pipeline.generate_silence_wav(warmup_dir / "silence.wav")
+    pipeline.diarize_nemo(silence_wav, warmup_dir, device)
+
+    print("[worker] ready", flush=True)
+    ready_queue.put("ready")
+
+    while True:
+        file_id = job_queue.get()
+        if file_id is None:  # сигнал остановки от API-процесса
+            break
+        try:
+            process_job(model, device, file_id)
+        except Exception as e:
+            set_status(file_id, status="error", stage=None, error=f"{e}\n{traceback.format_exc()[-2000:]}")
+
+
+# --- API-процесс: только оркестрация, CUDA/Whisper/NeMo не касается ---------
+
+
+def spawn_worker(app: FastAPI) -> None:
+    """Поднимает воркер-процесс и блокирует (в вызывающем to_thread) до его готовности —
+    с таймаутом на каждый опрос, чтобы не зависнуть навечно, если процесс упал при старте."""
+    ready_queue = MP_CTX.Queue()
+    process = MP_CTX.Process(
+        target=worker_main, args=(app.state.job_queue, ready_queue, app.state.device), daemon=True,
+    )
+    process.start()
+    while True:
+        if not process.is_alive():
+            raise RuntimeError("воркер-процесс упал во время старта (загрузка моделей) — см. логи контейнера")
+        try:
+            ready_queue.get(timeout=WORKER_READY_POLL_SEC)
+            break
+        except queue.Empty:
+            continue
+    app.state.worker_process = process
+
+
+async def watchdog(app: FastAPI) -> None:
+    """Если воркер упал жёстко (то, что try/except в worker_main поймать не может) —
+    помечает зависшую в processing задачу ошибкой и поднимает воркера заново, чтобы очередь
+    не встала намертво, а API/UI не пострадали от краша в ASR/диаризации."""
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+        if app.state.worker_process.is_alive():
+            continue
+
+        print("[watchdog] воркер-процесс упал, перезапускаю...", flush=True)
+        for status_path in DATA_DIR.glob("*/status.json"):
+            st = json.loads(status_path.read_text(encoding="utf-8"))
+            if st.get("status") == "processing":
+                st.update(status="error", stage=None, error="воркер-процесс упал (краш ASR/диаризации)")
+                status_path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+
+        app.state.ready = False
+        await asyncio.to_thread(spawn_worker, app)
+        app.state.ready = True
+        print("[watchdog] воркер перезапущен", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     app.state.ready = False
     app.state.device = pipeline.detect_device()
-    app.state.queue = asyncio.Queue()
+    app.state.job_queue = MP_CTX.Queue()
     print(f"[startup] device: {app.state.device}")
 
-    print("[startup] loading Whisper...")
-    app.state.whisper_model = await asyncio.to_thread(pipeline.load_whisper_model, WHISPER_MODEL, "cpu")
-
-    print("[startup] warming up NeMo (форсируем скачивание весов сразу, не на первом запросе)...")
-    warmup_dir = DATA_DIR / "_warmup"
-    warmup_dir.mkdir(parents=True, exist_ok=True)
-    silence_wav = await asyncio.to_thread(pipeline.generate_silence_wav, warmup_dir / "silence.wav")
-    await asyncio.to_thread(pipeline.diarize_nemo, silence_wav, warmup_dir, app.state.device)
-
+    await asyncio.to_thread(spawn_worker, app)
     app.state.ready = True
     print("[startup] ready")
 
-    worker_task = asyncio.create_task(worker(app))
+    watchdog_task = asyncio.create_task(watchdog(app))
     yield
-    worker_task.cancel()
+
+    watchdog_task.cancel()
+    app.state.job_queue.put(None)
+    app.state.worker_process.join(timeout=5)
+    if app.state.worker_process.is_alive():
+        app.state.worker_process.terminate()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -178,7 +248,7 @@ async def transcribe(file_id: str):
     if not app.state.ready:
         raise HTTPException(503, "модели ещё прогреваются, попробуйте через немного")
     set_status(file_id, status="queued", stage=None, error=None)
-    await app.state.queue.put(file_id)
+    app.state.job_queue.put(file_id)
     return {"status": "queued"}
 
 

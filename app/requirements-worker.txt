@@ -6,8 +6,8 @@ torchaudio==2.4.0
 # (pipeline/ct2_convert.py, pipeline/_openai_to_hf.py)
 openai-whisper
 faster-whisper==1.2.1
-ctranslate2==4.8.1
-transformers==5.14.1
+ctranslate2==4.4.0
+transformers==4.44.2
 nemo_toolkit[asr]
 omegaconf
 pymupdf

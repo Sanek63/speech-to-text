@@ -50,6 +50,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
+    shm_size: '2gb'  # дефолтные 64МБ Docker убивают PyTorch DataLoader (NeMo) bus error'ом на shared memory
     environment:
       DATABASE_URL: postgresql://speech:speech@postgres:5432/speech
       REDIS_URL: redis://redis:6379/0

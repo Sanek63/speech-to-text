@@ -10,6 +10,7 @@
 import os
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 import redis
@@ -18,6 +19,11 @@ import torch
 import db
 import jobqueue
 import pipeline
+
+
+def log(msg: str) -> None:
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
@@ -51,7 +57,7 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     d = job_dir(file_id)
     original = next(d.glob("original.*"))
 
-    print(f"[worker] [{file_id}] препроцессинг аудио...", flush=True)
+    log(f"[worker] [{file_id}] препроцессинг аудио...")
     db.sync_set_status(conn, file_id, status="processing", stage="preprocess", progress=None)
     t0 = time.time()
 
@@ -60,14 +66,14 @@ def process_job(conn, model, device: str, file_id: str) -> None:
         try:
             db.sync_set_status(conn, file_id, stage="preprocess", progress=round(pct, 1))
         except Exception as e:
-            print(f"[worker] [{file_id}] не удалось записать прогресс препроцессинга: {e}", flush=True)
+            log(f"[worker] [{file_id}] не удалось записать прогресс препроцессинга: {e}")
 
     wav_path = pipeline.preprocess_audio(original, d, on_progress=_report_preprocess_progress)
     duration = pipeline.get_audio_duration(wav_path)
     preprocess_time = time.time() - t0
-    print(f"[worker] [{file_id}] длительность аудио {duration:.0f}с, препроцессинг за {preprocess_time:.1f}с", flush=True)
+    log(f"[worker] [{file_id}] длительность аудио {duration:.0f}с, препроцессинг за {preprocess_time:.1f}с")
 
-    print(f"[worker] [{file_id}] ASR (Whisper {WHISPER_MODEL})...", flush=True)
+    log(f"[worker] [{file_id}] ASR (Whisper {WHISPER_MODEL})...")
     db.sync_set_status(conn, file_id, status="processing", stage="asr", progress=None)
     t0 = time.time()
     if duration > CHUNK_THRESHOLD_SEC:
@@ -76,16 +82,16 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     else:
         result = _run_asr(model, device, wav_path)
     asr_time = time.time() - t0
-    print(f"[worker] [{file_id}] ASR готов за {asr_time:.1f}с", flush=True)
+    log(f"[worker] [{file_id}] ASR готов за {asr_time:.1f}с")
 
-    print(f"[worker] [{file_id}] диаризация (NeMo MSDD)...", flush=True)
+    log(f"[worker] [{file_id}] диаризация (NeMo MSDD)...")
     db.sync_set_status(conn, file_id, status="processing", stage="diarization")
     t0 = time.time()
     diarization = pipeline.diarize_nemo(wav_path, d, device)
     diarization_time = time.time() - t0
-    print(f"[worker] [{file_id}] диаризация готова за {diarization_time:.1f}с", flush=True)
+    log(f"[worker] [{file_id}] диаризация готова за {diarization_time:.1f}с")
 
-    print(f"[worker] [{file_id}] роли и экспорт...", flush=True)
+    log(f"[worker] [{file_id}] роли и экспорт...")
     db.sync_set_status(conn, file_id, status="processing", stage="postprocess")
     t0 = time.time()
     result = pipeline.assign_word_speakers(result, diarization)
@@ -112,38 +118,37 @@ def process_job(conn, model, device: str, file_id: str) -> None:
         "postprocess_time_sec": round(postprocess_time, 2), "postprocess_rtf": rtf(postprocess_time),
         "total_time_sec": round(total_time, 2), "total_rtf": rtf(total_time),
     }
-    print(f"[worker] [{file_id}] готово за {total_time:.1f}с, total_rtf={metrics['total_rtf']}", flush=True)
+    log(f"[worker] [{file_id}] готово за {total_time:.1f}с, total_rtf={metrics['total_rtf']}")
     db.sync_set_status(conn, file_id, status="done", stage=None, metrics=metrics, transcript=transcript_dict)
 
 
 def _log_gpu_memory() -> None:
     free_bytes, total_bytes = torch.cuda.mem_get_info()
     free_gb, total_gb = free_bytes / 1e9, total_bytes / 1e9
-    print(f"[worker] GPU память: {free_gb:.2f}/{total_gb:.2f} ГБ свободно", flush=True)
+    log(f"[worker] GPU память: {free_gb:.2f}/{total_gb:.2f} ГБ свободно")
     if free_gb < 8:
-        print(
+        log(
             f"[worker] ВНИМАНИЕ: свободно всего {free_gb:.2f}ГБ, а Whisper large-v3 обычно "
             "требует ~14ГБ. Похоже, GPU-память ещё занята другим процессом (например, не до "
             "конца остановленным старым контейнером воркера после рестарта). Проверьте на "
             "хосте `nvidia-smi` (PID держащих память) и `docker compose ps` (нет ли лишних "
-            "контейнеров) до того, как загрузка модели упадёт в OOM.",
-            flush=True,
+            "контейнеров) до того, как загрузка модели упадёт в OOM."
         )
 
 
 def main() -> None:
     device = pipeline.detect_device()
-    print(f"[worker] device: {device}", flush=True)
+    log(f"[worker] device: {device}")
     if device == "cuda":
         _log_gpu_memory()
 
     db.sync_init_schema()
     conn = db.sync_connect()
 
-    print("[worker] loading Whisper...", flush=True)
+    log("[worker] loading Whisper...")
     model = pipeline.load_whisper_model(WHISPER_MODEL, "cpu")
 
-    print("[worker] warming up NeMo (форсируем скачивание весов сразу)...", flush=True)
+    log("[worker] warming up NeMo (форсируем скачивание весов сразу)...")
     warmup_dir = DATA_DIR / "_warmup"
     warmup_dir.mkdir(parents=True, exist_ok=True)
     silence_wav = pipeline.generate_silence_wav(warmup_dir / "silence.wav")
@@ -156,7 +161,7 @@ def main() -> None:
         # цели warm-up это ожидаемо и не ошибка.
         if "silence" not in str(e).lower():
             raise
-        print(f"[worker] warm-up diarize пропущен (тишина, ожидаемо): {e}", flush=True)
+        log(f"[worker] warm-up diarize пропущен (тишина, ожидаемо): {e}")
 
     redis_client = jobqueue.sync_client()
 
@@ -165,33 +170,48 @@ def main() -> None:
     # успевшие восстановиться не помечались error и пересчитались с нуля вместо этого.
     recovered = jobqueue.sync_recover_stuck_jobs(redis_client)
     if recovered:
-        print(f"[worker] после рестарта нашёл {len(recovered)} незавершённых задач(и), верну в работу: {recovered}", flush=True)
+        log(f"[worker] после рестарта нашёл {len(recovered)} незавершённых задач(и), верну в работу: {recovered}")
     db.sync_reconcile_interrupted(conn, "воркер перезапустился во время обработки этой задачи", keep_file_ids=recovered)
 
-    print("[worker] ready", flush=True)
+    log("[worker] ready")
 
     while True:
         try:
             file_id = jobqueue.sync_pop_job(redis_client)
         except redis.exceptions.RedisError as e:
-            print(f"[worker] Redis временно недоступен ({e}), пробую снова через 2с", flush=True)
+            # Соединение обычно простаивает по 10-20+ минут между задачами (пока идёт ASR/
+            # диаризация) -- за это время его может незаметно оборвать промежуточная сеть, и
+            # повторный вызов на ТОМ ЖЕ клиенте просто ловит ту же ошибку по кругу. Пересоздаём
+            # клиента целиком, а не надеемся, что пул соединений сам восстановится.
+            log(f"[worker] Redis временно недоступен ({e}), переподключаюсь через 2с")
             time.sleep(2)
+            try:
+                redis_client.close()
+            except Exception:
+                pass
+            redis_client = jobqueue.sync_client()
             continue
 
         if file_id is None:
             continue  # обычный таймаут BLMOVE — новых задач нет, просто снова ждём
 
-        print(f"[worker] взял задачу {file_id}", flush=True)
+        log(f"[worker] взял задачу {file_id}")
         try:
             process_job(conn, model, device, file_id)
         except Exception as e:
-            print(f"[worker] задача {file_id} упала: {e}", flush=True)
+            log(f"[worker] задача {file_id} упала: {e}")
             db.sync_set_status(
                 conn, file_id, status="error", stage=None,
                 error=f"{e}\n{traceback.format_exc()[-2000:]}",
             )
         finally:
-            jobqueue.sync_ack_job(redis_client, file_id)
+            # Если это тоже упадёт (та же протухшая коннекция) -- не даём убить весь процесс
+            # из-за неснятой отметки processing: sync_recover_stuck_jobs подберёт её на
+            # следующем рестарте воркера и пересчитает заново, это не потеря данных.
+            try:
+                jobqueue.sync_ack_job(redis_client, file_id)
+            except redis.exceptions.RedisError as e:
+                log(f"[worker] не удалось снять задачу {file_id} с processing-списка ({e}) — подберётся сама при следующем рестарте")
 
 
 if __name__ == "__main__":

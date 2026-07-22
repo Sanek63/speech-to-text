@@ -14,7 +14,12 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 
 
 
 def sync_client() -> redis.Redis:
-    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    # socket_keepalive: соединение может простаивать по 10-20+ минут между задачами (пока
+    # идёт ASR/диаризация) — без TCP keepalive такое долгое молчание рискует быть тихо
+    # оборвано промежуточной сетью, и следующий запрос ловит труднообъяснимый TimeoutError.
+    # socket_timeout НЕ выставляем — иначе он будет конфликтовать с собственным timeout
+    # блокирующих команд (BLMOVE) и рвать их раньше времени.
+    return redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_keepalive=True)
 
 
 def sync_pop_job(client: redis.Redis, timeout_sec: int = 5) -> str | None:
@@ -50,7 +55,7 @@ def sync_recover_stuck_jobs(client: redis.Redis) -> list[str]:
 
 
 def async_client() -> aredis.Redis:
-    return aredis.Redis.from_url(REDIS_URL, decode_responses=True)
+    return aredis.Redis.from_url(REDIS_URL, decode_responses=True, socket_keepalive=True)
 
 
 async def async_push_job(client: aredis.Redis, file_id: str) -> None:

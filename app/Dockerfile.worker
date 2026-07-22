@@ -1,6 +1,9 @@
 FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# build-essential -- образ ...-runtime (не -devel) не содержит компилятор вообще, а
+# texterrors (транзитивная зависимость nemo_toolkit[asr]) не имеет готового wheel под эту
+# платформу и собирается из C++ исходников при установке.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

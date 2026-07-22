@@ -6,9 +6,21 @@ torchaudio==2.4.0
 # (pipeline/ct2_convert.py, pipeline/_openai_to_hf.py)
 openai-whisper
 faster-whisper==1.2.1
+# ctranslate2==4.4.0, не более новая: TransformersConverter в 4.8.1 зовёт
+# from_pretrained(..., dtype=...), а этого кварга нет даже в transformers==4.53.3 (появился
+# позже) -- 4.4.0 использует старое имя torch_dtype=, которое transformers 4.53.x ещё
+# принимает.
 ctranslate2==4.4.0
-transformers==4.44.2
-nemo_toolkit[asr]
+# transformers: закреплена под то, что реально требует nemo_toolkit[asr]==2.6.0 (~=4.53.0);
+# одновременно достаточно старая, чтобы не тянуть torch.distributed.tensor.DTensor
+# (которого нет в закреплённом torch==2.4.0). Вся тройка (torch/transformers/ctranslate2/
+# nemo) проверена вместе через pip install --dry-run без конфликтов.
+transformers~=4.53.0
+# nemo_toolkit[asr]==2.7.3 требует torch>=2.6.0, конфликт с закреплённым torch==2.4.0.
+# 2.6.0 -- последняя версия без этого требования; конфиг диаризации (config.py,
+# NEMO_DIAR_CONFIG_URL) идентичен между v2.6.0 и v2.7.3 (сверено diff'ом), схема не
+# страдает.
+nemo_toolkit[asr]==2.6.0
 omegaconf
 pymupdf
 psycopg[binary]

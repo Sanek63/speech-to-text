@@ -1,7 +1,9 @@
 NEMO_DIAR_CONFIG_URL = (
-    "https://raw.githubusercontent.com/NVIDIA/NeMo/v2.7.3/examples/speaker_tasks/"
+    "https://raw.githubusercontent.com/NVIDIA/NeMo/v2.6.0/examples/speaker_tasks/"
     "diarization/conf/inference/diar_infer_telephonic.yaml"
-)
+)  # nemo_toolkit закреплён на 2.6.0 в requirements-worker.txt -- содержимое йамлика
+# идентично v2.7.3 (сверено diff'ом), но URL держим в согласии с реально установленной
+# версией, а не с тем, что было исторически
 
 ROLE_WEIGHTS = {
     "turn_count": 0.25,

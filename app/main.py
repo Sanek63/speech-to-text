@@ -7,6 +7,7 @@ import time
 import traceback
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -34,12 +35,38 @@ def job_dir(file_id: str) -> Path:
     return DATA_DIR / file_id
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def set_status(file_id: str, **kwargs) -> dict:
     path = job_dir(file_id) / "status.json"
     current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    current.setdefault("file_id", file_id)
+    current.setdefault("created_at", now_iso())
     current.update(kwargs)
+    current["updated_at"] = now_iso()
     path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
     return current
+
+
+def list_jobs() -> list[dict]:
+    jobs = []
+    for status_path in DATA_DIR.glob("*/status.json"):
+        try:
+            jobs.append(json.loads(status_path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            continue
+    jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+    return jobs
+
+
+def reconcile_interrupted_jobs(reason: str) -> None:
+    """Джобы, застрявшие в queued/processing (сервер/воркер умер посреди работы) — иначе
+    UI будет вечно показывать 'в процессе', хотя их больше никто не считает."""
+    for job in list_jobs():
+        if job.get("status") in ("queued", "processing"):
+            set_status(job["file_id"], status="error", stage=None, error=reason)
 
 
 def load_status(file_id: str) -> dict | None:
@@ -158,10 +185,17 @@ def worker_main(job_queue: multiprocessing.Queue, ready_queue: multiprocessing.Q
 
 def spawn_worker(app: FastAPI) -> None:
     """Поднимает воркер-процесс и блокирует (в вызывающем to_thread) до его готовности —
-    с таймаутом на каждый опрос, чтобы не зависнуть навечно, если процесс упал при старте."""
+    с таймаутом на каждый опрос, чтобы не зависнуть навечно, если процесс упал при старте.
+
+    daemon=False намеренно: NeMo сам порождает дочерние процессы (torch DataLoader с
+    num_workers>0 для VAD), а Python запрещает daemon-процессам иметь своих детей
+    (AssertionError: daemonic processes are not allowed to have children). Явный
+    shutdown (job_queue.put(None) → join → terminate) уже есть в lifespan ниже и не
+    зависит от флага daemon — при падении контейнера процесс всё равно убьёт вместе
+    со всей cgroup, а не оставит висеть на хосте."""
     ready_queue = MP_CTX.Queue()
     process = MP_CTX.Process(
-        target=worker_main, args=(app.state.job_queue, ready_queue, app.state.device), daemon=True,
+        target=worker_main, args=(app.state.job_queue, ready_queue, app.state.device), daemon=False,
     )
     process.start()
     while True:
@@ -173,6 +207,7 @@ def spawn_worker(app: FastAPI) -> None:
         except queue.Empty:
             continue
     app.state.worker_process = process
+    app.state.worker_started_at = now_iso()
 
 
 async def watchdog(app: FastAPI) -> None:
@@ -185,13 +220,10 @@ async def watchdog(app: FastAPI) -> None:
             continue
 
         print("[watchdog] воркер-процесс упал, перезапускаю...", flush=True)
-        for status_path in DATA_DIR.glob("*/status.json"):
-            st = json.loads(status_path.read_text(encoding="utf-8"))
-            if st.get("status") == "processing":
-                st.update(status="error", stage=None, error="воркер-процесс упал (краш ASR/диаризации)")
-                status_path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        reconcile_interrupted_jobs("воркер-процесс упал (краш ASR/диаризации)")
 
         app.state.ready = False
+        app.state.worker_restart_count += 1
         await asyncio.to_thread(spawn_worker, app)
         app.state.ready = True
         print("[watchdog] воркер перезапущен", flush=True)
@@ -203,8 +235,10 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     app.state.device = pipeline.detect_device()
     app.state.job_queue = MP_CTX.Queue()
+    app.state.worker_restart_count = 0
     print(f"[startup] device: {app.state.device}")
 
+    reconcile_interrupted_jobs("сервер перезапустился во время обработки этой задачи")
     await asyncio.to_thread(spawn_worker, app)
     app.state.ready = True
     print("[startup] ready")
@@ -225,6 +259,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/api/health")
 async def health():
     return {"ready": getattr(app.state, "ready", False)}
+
+
+# /api/worker и /api/jobs намеренно не публичные HTTP-роуты: в открытом для всех сервисе
+# это была бы утечка чужих file_id/статусов/ошибок кому угодно. list_jobs() продолжает
+# использоваться внутри — для reconcile_interrupted_jobs() при старте/после краша воркера.
 
 
 @app.post("/api/upload")

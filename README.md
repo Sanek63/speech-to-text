@@ -45,7 +45,7 @@ speech-to-text/
 
 | Задача | Технология | Почему |
 |---|---|---|
-| ASR (речь → текст) | [`openai-whisper`](https://github.com/openai/whisper), модель `large-v3` | Лучший WER для русского среди открытых моделей; встроенные word-level таймкоды |
+| ASR (речь → текст) | Веса `large-v3` [openai-whisper](https://github.com/openai/whisper), инференс — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) | Лучший WER для русского среди открытых моделей; встроенные word-level таймкоды. CTranslate2 заметно быстрее и экономнее по GPU-памяти, чем эталонный PyTorch-рантайм — конвертация весов полностью локальная (`pipeline/ct2_convert.py`), без обращений к HuggingFace |
 | Диаризация (кто говорит) | [NVIDIA NeMo](https://github.com/NVIDIA/NeMo) MSDD (`diar_msdd_telephonic`) | Качество в одном классе с `pyannote`, включая детекцию перекрывающейся речи |
 | Резка аудио / формат | `ffmpeg` / `ffprobe` | Конвертация в 16kHz mono WAV, `silencedetect` для чанкования, вырезка кусков |
 | Ролевая классификация | Собственная rule-based эвристика (без ML) | Явные, объяснимые правила — не чёрный ящик, не нужны размеченные данные |

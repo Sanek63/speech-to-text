@@ -153,7 +153,12 @@ def main() -> None:
     conn = db.sync_connect()
 
     log("[worker] loading Whisper...")
-    model = pipeline.load_whisper_model(WHISPER_MODEL, "cpu")
+    # device, не "cpu": faster-whisper (CTranslate2) фиксирует устройство при создании модели
+    # и не меняет его — move_model() дальше только выгружает/подгружает веса между этим
+    # устройством и CPU (unload_model/load_model), а не переключает на произвольное другое,
+    # как умел .to(device) у прежнего openai-whisper. load_whisper_model сама сразу
+    # выгружает модель на CPU после создания, так что резидентность между задачами та же.
+    model = pipeline.load_whisper_model(WHISPER_MODEL, device)
 
     log("[worker] warming up NeMo (форсируем скачивание весов сразу)...")
     warmup_dir = DATA_DIR / "_warmup"

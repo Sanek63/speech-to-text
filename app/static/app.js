@@ -3,6 +3,7 @@ const uploadBtn = document.getElementById("upload-btn");
 const uploadStatus = document.getElementById("upload-status");
 const uploadProgress = document.getElementById("upload-progress");
 const uploadProgressBar = document.getElementById("upload-progress-bar");
+const dropOverlay = document.getElementById("drop-overlay");
 const jobsListEl = document.getElementById("jobs-list");
 const jobsPrevBtn = document.getElementById("jobs-prev");
 const jobsNextBtn = document.getElementById("jobs-next");
@@ -72,59 +73,129 @@ function formatSeconds(sec) {
 }
 
 // --- Загрузка файла (XHR, не fetch — только у XHR есть событие прогресса отправки) --------
+// Очередь, а не параллельные запросы: и выбор в инпуте, и drag-and-drop могут дать сразу
+// несколько файлов, а UI-элемент прогресса один общий — грузим по одному, по порядку.
+
+let uploadQueue = [];
+let uploading = false;
+
+function enqueueUploads(files) {
+  // f.type пустой, если браузер не смог определить MIME по расширению — не блокируем в
+  // этом случае сами, пусть решает бекенд/ffmpeg; отсеиваем только явно НЕ аудио/видео
+  const audioVideo = files.filter((f) => !f.type || /^(audio|video)\//.test(f.type));
+  if (audioVideo.length === 0 && files.length > 0) {
+    showError("Файл не похож на аудио/видео");
+    return;
+  }
+  uploadQueue.push(...audioVideo);
+  processUploadQueue();
+}
+
+async function processUploadQueue() {
+  if (uploading || uploadQueue.length === 0) return;
+  uploading = true;
+  uploadBtn.disabled = true;
+  while (uploadQueue.length > 0) {
+    const file = uploadQueue.shift();
+    await uploadFile(file, uploadQueue.length);
+  }
+  uploading = false;
+  uploadBtn.disabled = false;
+}
+
+function uploadFile(file, remainingAfter) {
+  return new Promise((resolve) => {
+    // clearError() здесь не вызываем: при батче из нескольких файлов это стирало бы
+    // ошибку предыдущего файла в тот момент, когда стартует следующий — очищаем один раз
+    // за весь батч, в обработчике клика/drop, до enqueueUploads().
+    const suffix = remainingAfter > 0 ? ` (ещё ${remainingAfter} в очереди)` : "";
+    uploadStatus.textContent = `Загрузка «${file.name}»... 0%${suffix}`;
+    uploadProgress.classList.remove("hidden");
+    uploadProgressBar.style.width = "0%";
+
+    const form = new FormData();
+    form.append("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round((e.loaded / e.total) * 100);
+      uploadProgressBar.style.width = `${pct}%`;
+      uploadStatus.textContent = `Загрузка «${file.name}»... ${pct}%${suffix}`;
+    });
+
+    xhr.addEventListener("load", () => {
+      uploadProgress.classList.add("hidden");
+      if (xhr.status >= 200 && xhr.status < 300) {
+        uploadStatus.textContent = "Загружено";
+        jobsPage = 0; // новая задача — самая свежая, всегда на первой странице
+        loadJobsList();
+      } else {
+        let message = `Upload failed: ${xhr.status}`;
+        try {
+          const detail = JSON.parse(xhr.responseText);
+          if (detail.detail) message = detail.detail;
+        } catch (_) {
+          // тело ответа не JSON — оставляем дефолтное сообщение
+        }
+        showError(`«${file.name}»: ${message}`);
+      }
+      resolve();
+    });
+
+    xhr.addEventListener("error", () => {
+      uploadProgress.classList.add("hidden");
+      showError(`«${file.name}»: ошибка сети при загрузке файла`);
+      resolve();
+    });
+
+    xhr.send(form);
+  });
+}
 
 uploadBtn.addEventListener("click", () => {
   clearError();
-  const file = fileInput.files[0];
-  if (!file) {
+  const files = Array.from(fileInput.files);
+  if (files.length === 0) {
     uploadStatus.textContent = "Выберите файл";
     return;
   }
-  uploadStatus.textContent = "Загрузка... 0%";
-  uploadBtn.disabled = true;
-  uploadProgress.classList.remove("hidden");
-  uploadProgressBar.style.width = "0%";
+  fileInput.value = ""; // сразу можно выбрать следующий файл
+  enqueueUploads(files);
+});
 
-  const form = new FormData();
-  form.append("file", file);
+// --- Drag-and-drop файла в любое место страницы --------------------------------------------
 
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
+let dragCounter = 0;
 
-  xhr.upload.addEventListener("progress", (e) => {
-    if (!e.lengthComputable) return;
-    const pct = Math.round((e.loaded / e.total) * 100);
-    uploadProgressBar.style.width = `${pct}%`;
-    uploadStatus.textContent = `Загрузка... ${pct}%`;
-  });
+window.addEventListener("dragenter", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  dragCounter++;
+  dropOverlay.classList.remove("hidden");
+});
 
-  xhr.addEventListener("load", () => {
-    uploadBtn.disabled = false;
-    uploadProgress.classList.add("hidden");
-    if (xhr.status >= 200 && xhr.status < 300) {
-      uploadStatus.textContent = "Загружено";
-      fileInput.value = ""; // сразу можно выбрать следующий файл
-      jobsPage = 0; // новая задача — самая свежая, всегда на первой странице
-      loadJobsList();
-    } else {
-      let message = `Upload failed: ${xhr.status}`;
-      try {
-        const detail = JSON.parse(xhr.responseText);
-        if (detail.detail) message = detail.detail;
-      } catch (_) {
-        // тело ответа не JSON — оставляем дефолтное сообщение
-      }
-      showError(message);
-    }
-  });
+window.addEventListener("dragover", (e) => {
+  // без preventDefault здесь событие drop вообще не сработает — так задумано в DnD API
+  if (e.dataTransfer && e.dataTransfer.types.includes("Files")) e.preventDefault();
+});
 
-  xhr.addEventListener("error", () => {
-    uploadBtn.disabled = false;
-    uploadProgress.classList.add("hidden");
-    showError("Ошибка сети при загрузке файла");
-  });
+window.addEventListener("dragleave", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  dragCounter = Math.max(0, dragCounter - 1);
+  if (dragCounter === 0) dropOverlay.classList.add("hidden");
+});
 
-  xhr.send(form);
+window.addEventListener("drop", (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.add("hidden");
+  clearError();
+  enqueueUploads(Array.from(e.dataTransfer.files));
 });
 
 // --- Список задач (пагинация + автообновление статусов) -----------------------------------

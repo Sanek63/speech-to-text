@@ -113,6 +113,27 @@ input[type="file"] {
   display: none !important;
 }
 
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(61, 90, 254, 0.12);
+  border: 3px dashed var(--accent);
+  pointer-events: none; /* реальные drag-события всегда обрабатываются нижележащими элементами и всплывают до window */
+}
+
+.drop-overlay-text {
+  padding: 1rem 1.5rem;
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius);
+  font-size: 1.1rem;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+}
+
 .spinner {
   width: 18px;
   height: 18px;

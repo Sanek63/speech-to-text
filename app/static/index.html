@@ -7,11 +7,15 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <div id="drop-overlay" class="drop-overlay hidden">
+    <div class="drop-overlay-text">Отпустите файл для загрузки</div>
+  </div>
+
   <main class="page">
     <h1>Транскрипция и диаризация</h1>
 
     <section class="upload-panel">
-      <input type="file" id="file-input" accept="audio/*,video/*">
+      <input type="file" id="file-input" accept="audio/*,video/*" multiple>
       <button id="upload-btn">Загрузить</button>
       <span id="upload-status" class="status-text"></span>
       <div id="upload-progress" class="upload-progress hidden">

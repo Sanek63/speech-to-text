@@ -56,16 +56,59 @@ def export_srt(turns: List[Turn], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+_SENTENCE_END_CHARS = (".", "!", "?", "…")
+_MAX_SENTENCE_WORDS = 40  # предохранитель на случай куска текста совсем без пунктуации
+
+
+def _split_into_sentences(words: List) -> List[List]:
+    sentences = []
+    current = []
+    for w in words:
+        current.append(w)
+        ends_sentence = w.text.rstrip().endswith(_SENTENCE_END_CHARS)
+        if ends_sentence or len(current) >= _MAX_SENTENCE_WORDS:
+            sentences.append(current)
+            current = []
+    if current:
+        sentences.append(current)
+    return sentences
+
+
+def _split_turn_for_display(turn: Turn, sentences_per_chunk: int = 2) -> List[Turn]:
+    """
+    Режет длинную реплику (например, 10-минутный монолог студента на защите — с ролью это
+    уже никак не связано, роль назначается раньше, на уровне непрерывной по спикеру реплики
+    в roles.py) на кусочки по 1-2 предложения — иначе в UI это один нечитаемый блок без
+    возможности перемотать на нужный момент внутри него. speaker/role наследуются как есть,
+    это разбивка для отображения, а не переклассификация.
+    """
+    sentences = _split_into_sentences(turn.words)
+    if len(sentences) <= 1:
+        return [turn]
+    chunks = []
+    for i in range(0, len(sentences), sentences_per_chunk):
+        chunk_words = [w for sentence in sentences[i : i + sentences_per_chunk] for w in sentence]
+        chunks.append(Turn(
+            speaker=turn.speaker, role=turn.role,
+            start=chunk_words[0].start, end=chunk_words[-1].end,
+            text=" ".join(w.text for w in chunk_words), words=chunk_words,
+        ))
+    return chunks
+
+
 def turns_to_dict(turns: List[Turn], audio_file: str = "", language: str = "") -> dict:
     """
     Общее представление транскрипта (объект с метаданными + реплики с word-level таймкодами
     и confidence) — используется и export_json() для файла, и backend'ом для отдачи по API,
-    без дублирования схемы в двух местах.
+    без дублирования схемы в двух местах. Реплики здесь уже раздроблены на 1-2 предложения
+    для отображения (см. _split_turn_for_display) — роль/спикер посчитаны раньше, на исходных
+    непрерывных репликах, и не пересчитываются.
     """
+    display_turns = [c for t in turns for c in _split_turn_for_display(t)]
     return {
         "audio_file": audio_file,
         "language": language,
-        "duration": turns[-1].end if turns else 0.0,
+        "duration": display_turns[-1].end if display_turns else 0.0,
         "turns": [
             {
                 "id": i,
@@ -79,7 +122,7 @@ def turns_to_dict(turns: List[Turn], audio_file: str = "", language: str = "") -
                     for w in t.words
                 ],
             }
-            for i, t in enumerate(turns)
+            for i, t in enumerate(display_turns)
         ],
     }
 

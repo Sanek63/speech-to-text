@@ -37,18 +37,18 @@ def job_dir(file_id: str) -> Path:
     return DATA_DIR / file_id
 
 
-def _run_asr(model, device: str, wav_path: Path) -> dict:
+def _run_asr(model, device: str, wav_path: Path, on_progress=None) -> dict:
     pipeline.move_model(model, device)
     try:
-        return pipeline.transcribe_with_model(model, wav_path, LANGUAGE)
+        return pipeline.transcribe_with_model(model, wav_path, LANGUAGE, on_progress=on_progress)
     finally:
         pipeline.move_model(model, "cpu")
 
 
-def _run_asr_chunked(model, device: str, chunks) -> dict:
+def _run_asr_chunked(model, device: str, chunks, on_progress=None) -> dict:
     pipeline.move_model(model, device)
     try:
-        return pipeline.transcribe_chunked(model, chunks, LANGUAGE)
+        return pipeline.transcribe_chunked(model, chunks, LANGUAGE, on_progress=on_progress)
     finally:
         pipeline.move_model(model, "cpu")
 
@@ -76,16 +76,23 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     log(f"[worker] [{file_id}] ASR (Whisper {WHISPER_MODEL})...")
     db.sync_set_status(conn, file_id, status="processing", stage="asr", progress=None)
     t0 = time.time()
+
+    def _report_asr_progress(pct: float) -> None:
+        try:
+            db.sync_set_status(conn, file_id, stage="asr", progress=round(pct, 1))
+        except Exception as e:
+            log(f"[worker] [{file_id}] не удалось записать прогресс ASR: {e}")
+
     if duration > CHUNK_THRESHOLD_SEC:
         chunks = pipeline.split_audio_on_silence(wav_path, d, CHUNK_TARGET_SEC, CHUNK_MAX_SEC)
-        result = _run_asr_chunked(model, device, chunks)
+        result = _run_asr_chunked(model, device, chunks, on_progress=_report_asr_progress)
     else:
-        result = _run_asr(model, device, wav_path)
+        result = _run_asr(model, device, wav_path, on_progress=_report_asr_progress)
     asr_time = time.time() - t0
     log(f"[worker] [{file_id}] ASR готов за {asr_time:.1f}с")
 
     log(f"[worker] [{file_id}] диаризация (NeMo MSDD)...")
-    db.sync_set_status(conn, file_id, status="processing", stage="diarization")
+    db.sync_set_status(conn, file_id, status="processing", stage="diarization", progress=None)
     t0 = time.time()
     diarization = pipeline.diarize_nemo(wav_path, d, device)
     diarization_time = time.time() - t0

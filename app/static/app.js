@@ -46,10 +46,14 @@ function clearError() {
   errorPanel.textContent = "";
 }
 
+function hasDeterminateProgress(job) {
+  return (job.stage === "preprocess" || job.stage === "asr") && job.progress != null;
+}
+
 function jobStatusLabel(job) {
   if (job.status === "processing") {
     const label = STAGE_LABELS[job.stage] || "Обработка...";
-    if (job.stage === "preprocess" && job.progress != null) {
+    if (hasDeterminateProgress(job)) {
       return `${label} ${Math.round(job.progress)}%`;
     }
     return label;
@@ -264,7 +268,10 @@ function renderJobRow(job) {
   }
   badge.appendChild(document.createTextNode(jobStatusLabel(job)));
 
-  const isTimedStage = job.status === "processing" && (job.stage === "asr" || job.stage === "diarization");
+  const isProcessingAsrOrDiar = job.status === "processing" && (job.stage === "asr" || job.stage === "diarization");
+  // Индикатор "не зависло" без точного процента -- показываем, только пока нет реального
+  // прогресса (диаризация всегда, ASR -- до первого апдейта от хука в pipeline/asr.py)
+  const isTimedStage = isProcessingAsrOrDiar && !hasDeterminateProgress(job);
   if (isTimedStage) {
     badge.appendChild(document.createTextNode(" "));
     const elapsed = document.createElement("span");
@@ -283,7 +290,7 @@ function renderJobRow(job) {
 
   row.appendChild(main);
 
-  if (job.status === "processing" && job.stage === "preprocess" && job.progress != null) {
+  if (job.status === "processing" && hasDeterminateProgress(job)) {
     const track = document.createElement("div");
     track.className = "job-progress";
     const bar = document.createElement("div");

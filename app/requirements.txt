@@ -1,0 +1,7 @@
+openai-whisper
+nemo_toolkit[asr]
+omegaconf
+pymupdf
+fastapi
+uvicorn[standard]
+python-multipart

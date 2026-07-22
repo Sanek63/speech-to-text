@@ -1,0 +1,18 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "11111:8000"
+    volumes:
+      - ./data:/app/data
+      - model-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model-cache:

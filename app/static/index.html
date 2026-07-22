@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Транскрипция и диаризация</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page">
+    <h1>Транскрипция и диаризация</h1>
+    <p class="subtitle">Преподаватель / Студент — по паттерну поведения, не по объёму речи</p>
+
+    <section class="upload-panel">
+      <input type="file" id="file-input" accept="audio/*,video/*">
+      <button id="upload-btn">Загрузить</button>
+      <button id="transcribe-btn" disabled>Транскрибировать</button>
+      <span id="upload-status" class="status-text"></span>
+    </section>
+
+    <section id="progress-panel" class="progress-panel hidden">
+      <div class="spinner"></div>
+      <span id="progress-text">Обработка...</span>
+    </section>
+
+    <section id="result-panel" class="result-panel hidden">
+      <audio id="player" controls></audio>
+
+      <div id="metrics" class="metrics"></div>
+
+      <div id="transcript" class="transcript"></div>
+    </section>
+
+    <section id="error-panel" class="error-panel hidden"></section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

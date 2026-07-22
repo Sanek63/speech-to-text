@@ -112,7 +112,16 @@ def main() -> None:
     warmup_dir = DATA_DIR / "_warmup"
     warmup_dir.mkdir(parents=True, exist_ok=True)
     silence_wav = pipeline.generate_silence_wav(warmup_dir / "silence.wav")
-    pipeline.diarize_nemo(silence_wav, warmup_dir, device)
+    try:
+        pipeline.diarize_nemo(silence_wav, warmup_dir, device)
+    except ValueError as e:
+        # NeMo сам детектирует VAD-ом полное отсутствие речи в тишине и осознанно
+        # прерывает .diarize() — но веса к этому моменту уже скачаны и загружены
+        # (это происходит раньше, при конструировании NeuralDiarizer), так что для
+        # цели warm-up это ожидаемо и не ошибка.
+        if "silence" not in str(e).lower():
+            raise
+        print(f"[worker] warm-up diarize пропущен (тишина, ожидаемо): {e}", flush=True)
 
     print("[worker] ready", flush=True)
     redis_client = jobqueue.sync_client()

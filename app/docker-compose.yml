@@ -1,10 +1,65 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: speech
+      POSTGRES_USER: speech
+      POSTGRES_PASSWORD: speech
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U speech"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes  # AOF-персистентность — очередь переживает рестарт
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   backend:
-    build: .
-    network_mode: host  # bridge/NAT не мог достучаться до Azure CDN (ENETUNREACH) — host обходит его полностью
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "11111:11111"
+    environment:
+      DATABASE_URL: postgresql://speech:speech@postgres:5432/speech
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql://speech:speech@postgres:5432/speech
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - ./data:/app/data
       - model-cache:/root/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
@@ -14,4 +69,6 @@ services:
               capabilities: [gpu]
 
 volumes:
+  postgres-data:
+  redis-data:
   model-cache:

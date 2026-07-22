@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-multipart
+psycopg[binary]
+psycopg-pool
+redis

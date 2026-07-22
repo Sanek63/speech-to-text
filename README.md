@@ -11,7 +11,7 @@ speech-to-text/
 │   └── script.pdf                  # эталонный транскрипт с ролями — источник для оценки качества
 ├── pipeline_nemo.ipynb          # автономный Colab-блокнот (без HuggingFace), тот же пайплайн по стадиям в ячейках
 ├── README.md
-└── app/                          # backend + UI — основной рабочий проект
+└── app/                          # backend + UI — основной рабочий проект, 4 сервиса в docker-compose
     ├── pipeline/                    # движок: декомпозированный pipeline_nemo.py, один модуль на стадию
     │   ├── __init__.py                 # реэкспорт публичного API пакета (`from pipeline import ...`)
     │   ├── config.py                    # веса ролевого скорера, лексические маркеры, URL конфига NeMo
@@ -25,15 +25,20 @@ speech-to-text/
     │   ├── export.py                           # Stage 6: экспорт text / srt / json
     │   ├── evaluate.py                          # Stage 7: WER + accuracy ролей против script.pdf
     │   └── cli.py                                # CLI поверх пакета — `python -m pipeline.cli`
-    ├── main.py                       # FastAPI: роуты, прогрев моделей при старте, очередь задач, RTF-метрики
+    ├── main.py                       # сервис backend: FastAPI-роуты — CUDA/Whisper/NeMo не касается вообще
+    ├── worker.py                     # сервис worker: грузит модели, забирает задачи из Redis, пишет в Postgres
+    ├── db.py                         # слой Postgres — схема + sync-запросы (worker) и async-запросы (backend)
+    ├── jobqueue.py                   # слой Redis — очередь задач (push из backend, blocking pop в worker)
     ├── static/                       # фронтенд — vanilla HTML/JS, без сборки/npm
     │   ├── index.html
     │   ├── app.js                       # upload → опрос статуса → плеер + транскрипт + live-подсветка
     │   └── style.css
-    ├── Dockerfile                    # pytorch+CUDA база + ffmpeg + зависимости
-    ├── docker-compose.yml            # GPU passthrough, порт 11111→8000, volume под кеш весов моделей
-    ├── requirements.txt
-    └── data/                        # рантайм: аплоады и результаты джобов — создаётся сам, в git не попадает
+    ├── Dockerfile.backend            # лёгкий образ (python:3.11-slim) — без CUDA, GPU не нужна
+    ├── Dockerfile.worker             # тяжёлый образ (pytorch+CUDA) — ffmpeg + зависимости пайплайна
+    ├── docker-compose.yml            # backend + worker + postgres + redis
+    ├── requirements-backend.txt
+    ├── requirements-worker.txt
+    └── data/                        # рантайм: сами аудиофайлы (метаданные/транскрипт — в Postgres), в git не попадает
 ```
 
 ## Технологии
@@ -145,7 +150,7 @@ ASR и диаризация — полностью независимые мод
 **CLI** (быстрый разовый прогон, требует локальную GPU-машину):
 ```bash
 cd app
-pip install -r requirements.txt
+pip install -r requirements-worker.txt
 python -m pipeline.cli ../audio/audio.mp3 --reference ../audio/script.pdf
 
 # для очень длинных записей (>45-60 мин):
@@ -159,22 +164,29 @@ python -m pipeline.cli ../audio/audio.mp3 --chunked --chunk-target-sec 600 --chu
 
 ## Backend + UI (`app/`)
 
-Тот же пайплайн (декомпозированный в пакет `app/pipeline/`, см. `app/pipeline/__init__.py` для публичного API), но как долгоживущий сервис: FastAPI держит модели прогретыми, отдаёт REST API и минималистичный веб-плеер с диаризованным транскриптом (клик по реплике — перемотка аудио, live-подсветка текущего слова, RTF-метрики по каждой стадии).
+Тот же пайплайн (декомпозированный в пакет `app/pipeline/`), но как публичный сервис — открыт без авторизации, рассчитан на закрытую (VPN) сеть, а не на произвольный интернет. Четыре сервиса в `docker-compose.yml`:
 
-Перед первым запуском стоит проверить, что GPU реально проброшена в Docker (не вопрос производительности — если `nvidia-container-toolkit` не настроен, GPU в контейнере просто не будет видна):
+| Сервис | Образ | Что делает |
+|---|---|---|
+| `backend` | `python:3.11-slim` (лёгкий, без CUDA) | FastAPI: приём загрузок, отдача статуса/транскрипта/аудио, статика UI. CUDA/Whisper/NeMo не импортирует вообще |
+| `worker` | `pytorch/pytorch:...-cuda12.1...` (тяжёлый) | Держит Whisper/NeMo резидентно, забирает задачи из Redis по одной, пишет результат в Postgres |
+| `postgres` | `postgres:16-alpine` | Источник правды по задачам: статус, стадия, метрики, сам транскрипт (JSONB) |
+| `redis` | `redis:7-alpine`, `--appendonly yes` | Очередь задач (`backend` → `LPUSH`, `worker` → блокирующий `BRPOP`), персистентна — очередь переживает рестарт |
+
+**Почему два контейнера, а не один.** `backend` и `worker` общаются только через Redis (очередь) и Postgres (результат) — ни общей памяти, ни прямой зависимости в коде. Из этого следует главное: супервизию воркера не нужно писать самим (как было на предыдущей итерации, через `multiprocessing` + свой watchdog) — если `worker` упадёт (нативный CUDA-краш в Whisper/NeMo, который Python-исключением не ловится), `docker-compose`-политика `restart: unless-stopped` просто поднимает контейнер заново; `backend` в это время ничего не знает и продолжает отвечать. При старте `worker` сверяет Postgres на задачи, застрявшие в `processing` (значит, предыдущий воркер умер посреди неё) — помечает их `error`, чтобы UI не показывал вечный прогресс; задачи в статусе `queued` не трогает — они целы в Redis.
+
+Перед первым запуском стоит проверить, что GPU реально проброшена в Docker (не вопрос производительности — если `nvidia-container-toolkit` не настроен, GPU в контейнере `worker` просто не будет видна):
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
 ```
 
 ```bash
 cd app
-docker-compose up --build
+docker compose up --build
 # открыть http://<host>:11111
 ```
 
-API: `POST /api/upload` (файл → `file_id`) → `POST /api/transcribe/{file_id}` (ставит в очередь) → опрос `GET /api/status/{file_id}` (стадия/RTF-метрики) → `GET /api/transcript/{file_id}`. ASR и диаризация внутри одной задачи никогда не выполняются параллельно (см. "Жизненный цикл моделей" в коде `app/main.py`) — на одной GPU-карте это уже приводило к OOM; несколько задач при этом можно ставить в очередь одновременно, не блокируя загрузку/опрос статуса.
-
-**Воркер — отдельный OS-процесс, не таск в event loop'е API.** Whisper/NeMo — нативный CUDA-код: жёсткий крах там (segfault, зависший драйвер, OOM-kill) не ловится Python-исключением и уронил бы весь uvicorn целиком. Поэтому весь инференс (`worker_main` в `main.py`) живёт в дочернем процессе (`multiprocessing`, `spawn` — CUDA не fork-safe), общаясь с API-процессом через очередь задач и `status.json` на диске. Watchdog в API-процессе следит за `is_alive()`: если воркер упал — зависшая задача помечается `error`, воркер поднимается заново, API/UI не прерываются.
+API: `POST /api/upload` (файл → `file_id`, единственный предохранитель — потолок размера файла) → `POST /api/transcribe/{file_id}` (кладёт `file_id` в Redis-очередь) → опрос `GET /api/status/{file_id}` (стадия/RTF-метрики из Postgres) → `GET /api/transcript/{file_id}` (сам транскрипт, отдельно от статуса — незачем гонять его на каждый опрос). ASR и диаризация внутри одной задачи никогда не выполняются параллельно (см. `app/worker.py`) — на одной GPU-карте это уже приводило к OOM.
 
 ## Формат вывода
 

@@ -56,15 +56,26 @@ def sync_set_status(conn: psycopg.Connection, file_id: str, **fields: Any) -> No
     conn.execute(f"UPDATE jobs SET {set_clause} WHERE file_id = %s", (*values, file_id))
 
 
-def sync_reconcile_interrupted(conn: psycopg.Connection, reason: str) -> None:
+def sync_reconcile_interrupted(
+    conn: psycopg.Connection, reason: str, keep_file_ids: list[str] | None = None
+) -> None:
     """При старте воркера: джобы, застрявшие в processing (предыдущий воркер умер посреди
     работы), иначе UI будет вечно показывать прогресс, хотя их больше никто не считает.
-    'queued' не трогаем — они целы в Redis (AOF-персистентность) и будут подхвачены заново."""
-    conn.execute(
-        "UPDATE jobs SET status = 'error', stage = NULL, error = %s, updated_at = now() "
-        "WHERE status = 'processing'",
-        (reason,),
-    )
+    'queued' не трогаем — они целы в Redis (AOF-персистентность) и будут подхвачены заново.
+    keep_file_ids — то, что jobqueue.sync_recover_stuck_jobs уже вернул в очередь на повтор:
+    их не помечаем ошибкой, они будут пересчитаны с нуля."""
+    if keep_file_ids:
+        conn.execute(
+            "UPDATE jobs SET status = 'error', stage = NULL, error = %s, updated_at = now() "
+            "WHERE status = 'processing' AND file_id::text != ALL(%s)",
+            (reason, keep_file_ids),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET status = 'error', stage = NULL, error = %s, updated_at = now() "
+            "WHERE status = 'processing'",
+            (reason,),
+        )
 
 
 # --- Асинхронный клиент — для API (FastAPI/uvicorn, event loop) -------------

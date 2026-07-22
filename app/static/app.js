@@ -2,6 +2,8 @@ const fileInput = document.getElementById("file-input");
 const uploadBtn = document.getElementById("upload-btn");
 const transcribeBtn = document.getElementById("transcribe-btn");
 const uploadStatus = document.getElementById("upload-status");
+const uploadProgress = document.getElementById("upload-progress");
+const uploadProgressBar = document.getElementById("upload-progress-bar");
 const progressPanel = document.getElementById("progress-panel");
 const progressText = document.getElementById("progress-text");
 const resultPanel = document.getElementById("result-panel");
@@ -17,6 +19,8 @@ const STAGE_LABELS = {
   postprocess: "Роли и экспорт...",
 };
 
+const STORAGE_KEY = "speech-to-text:file_id";
+
 let fileId = null;
 let pollTimer = null;
 let turns = [];
@@ -31,31 +35,98 @@ function clearError() {
   errorPanel.textContent = "";
 }
 
-uploadBtn.addEventListener("click", async () => {
+function saveJobState(id) {
+  localStorage.setItem(STORAGE_KEY, id);
+}
+
+// Восстанавливаем незавершённую (или уже готовую) задачу после перезагрузки вкладки —
+// сервер (Postgres) остаётся единственным источником истины о статусе, localStorage хранит
+// только "какой file_id проверить", ничего не додумывает сам.
+async function resumeJobIfAny() {
+  const savedId = localStorage.getItem(STORAGE_KEY);
+  if (!savedId) return;
+
+  try {
+    const res = await fetch(`/api/status/${savedId}`);
+    if (!res.ok) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    const st = await res.json();
+    fileId = savedId;
+    uploadStatus.textContent = `Восстановлено (id: ${fileId.slice(0, 8)}...)`;
+    transcribeBtn.disabled = false;
+
+    if (st.status === "done") {
+      await showResult(st.metrics);
+    } else if (st.status === "error") {
+      showError(st.error || "Неизвестная ошибка обработки");
+    } else if (st.status === "queued" || st.status === "processing") {
+      transcribeBtn.disabled = true;
+      progressPanel.classList.remove("hidden");
+      progressText.textContent = STAGE_LABELS[st.stage] || `Статус: ${st.status}...`;
+      pollStatus();
+    }
+  } catch (e) {
+    // страница открылась без сети/бекенда — просто не восстанавливаем, не критично
+  }
+}
+
+uploadBtn.addEventListener("click", () => {
   clearError();
   const file = fileInput.files[0];
   if (!file) {
     uploadStatus.textContent = "Выберите файл";
     return;
   }
-  uploadStatus.textContent = "Загрузка...";
+  uploadStatus.textContent = "Загрузка... 0%";
   uploadBtn.disabled = true;
+  uploadProgress.classList.remove("hidden");
+  uploadProgressBar.style.width = "0%";
 
   const form = new FormData();
   form.append("file", file);
 
-  try {
-    const res = await fetch("/api/upload", { method: "POST", body: form });
-    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-    const data = await res.json();
-    fileId = data.file_id;
-    uploadStatus.textContent = `Загружено (id: ${fileId.slice(0, 8)}...)`;
-    transcribeBtn.disabled = false;
-  } catch (e) {
-    showError(String(e));
-  } finally {
+  // XHR, не fetch — только у XHR есть событие прогресса именно отправки (upload.progress),
+  // что и нужно для полосы прогресса при загрузке большого файла.
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/upload");
+
+  xhr.upload.addEventListener("progress", (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    uploadProgressBar.style.width = `${pct}%`;
+    uploadStatus.textContent = `Загрузка... ${pct}%`;
+  });
+
+  xhr.addEventListener("load", () => {
     uploadBtn.disabled = false;
-  }
+    uploadProgress.classList.add("hidden");
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const data = JSON.parse(xhr.responseText);
+      fileId = data.file_id;
+      saveJobState(fileId);
+      uploadStatus.textContent = `Загружено (id: ${fileId.slice(0, 8)}...)`;
+      transcribeBtn.disabled = false;
+    } else {
+      let message = `Upload failed: ${xhr.status}`;
+      try {
+        const detail = JSON.parse(xhr.responseText);
+        if (detail.detail) message = detail.detail;
+      } catch (_) {
+        // тело ответа не JSON — оставляем дефолтное сообщение
+      }
+      showError(message);
+    }
+  });
+
+  xhr.addEventListener("error", () => {
+    uploadBtn.disabled = false;
+    uploadProgress.classList.add("hidden");
+    showError("Ошибка сети при загрузке файла");
+  });
+
+  xhr.send(form);
 });
 
 transcribeBtn.addEventListener("click", async () => {
@@ -209,3 +280,5 @@ player.addEventListener("timeupdate", () => {
     }
   }
 });
+
+resumeJobIfAny();

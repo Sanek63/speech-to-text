@@ -12,6 +12,9 @@ import time
 import traceback
 from pathlib import Path
 
+import redis
+import torch
+
 import db
 import jobqueue
 import pipeline
@@ -48,12 +51,15 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     d = job_dir(file_id)
     original = next(d.glob("original.*"))
 
+    print(f"[worker] [{file_id}] препроцессинг аудио...", flush=True)
     db.sync_set_status(conn, file_id, status="processing", stage="preprocess")
     t0 = time.time()
     wav_path = pipeline.preprocess_audio(original, d)
     duration = pipeline.get_audio_duration(wav_path)
     preprocess_time = time.time() - t0
+    print(f"[worker] [{file_id}] длительность аудио {duration:.0f}с, препроцессинг за {preprocess_time:.1f}с", flush=True)
 
+    print(f"[worker] [{file_id}] ASR (Whisper {WHISPER_MODEL})...", flush=True)
     db.sync_set_status(conn, file_id, status="processing", stage="asr")
     t0 = time.time()
     if duration > CHUNK_THRESHOLD_SEC:
@@ -62,12 +68,16 @@ def process_job(conn, model, device: str, file_id: str) -> None:
     else:
         result = _run_asr(model, device, wav_path)
     asr_time = time.time() - t0
+    print(f"[worker] [{file_id}] ASR готов за {asr_time:.1f}с", flush=True)
 
+    print(f"[worker] [{file_id}] диаризация (NeMo MSDD)...", flush=True)
     db.sync_set_status(conn, file_id, status="processing", stage="diarization")
     t0 = time.time()
     diarization = pipeline.diarize_nemo(wav_path, d, device)
     diarization_time = time.time() - t0
+    print(f"[worker] [{file_id}] диаризация готова за {diarization_time:.1f}с", flush=True)
 
+    print(f"[worker] [{file_id}] роли и экспорт...", flush=True)
     db.sync_set_status(conn, file_id, status="processing", stage="postprocess")
     t0 = time.time()
     result = pipeline.assign_word_speakers(result, diarization)
@@ -94,16 +104,33 @@ def process_job(conn, model, device: str, file_id: str) -> None:
         "postprocess_time_sec": round(postprocess_time, 2), "postprocess_rtf": rtf(postprocess_time),
         "total_time_sec": round(total_time, 2), "total_rtf": rtf(total_time),
     }
+    print(f"[worker] [{file_id}] готово за {total_time:.1f}с, total_rtf={metrics['total_rtf']}", flush=True)
     db.sync_set_status(conn, file_id, status="done", stage=None, metrics=metrics, transcript=transcript_dict)
+
+
+def _log_gpu_memory() -> None:
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    free_gb, total_gb = free_bytes / 1e9, total_bytes / 1e9
+    print(f"[worker] GPU память: {free_gb:.2f}/{total_gb:.2f} ГБ свободно", flush=True)
+    if free_gb < 8:
+        print(
+            f"[worker] ВНИМАНИЕ: свободно всего {free_gb:.2f}ГБ, а Whisper large-v3 обычно "
+            "требует ~14ГБ. Похоже, GPU-память ещё занята другим процессом (например, не до "
+            "конца остановленным старым контейнером воркера после рестарта). Проверьте на "
+            "хосте `nvidia-smi` (PID держащих память) и `docker compose ps` (нет ли лишних "
+            "контейнеров) до того, как загрузка модели упадёт в OOM.",
+            flush=True,
+        )
 
 
 def main() -> None:
     device = pipeline.detect_device()
     print(f"[worker] device: {device}", flush=True)
+    if device == "cuda":
+        _log_gpu_memory()
 
     db.sync_init_schema()
     conn = db.sync_connect()
-    db.sync_reconcile_interrupted(conn, "воркер перезапустился во время обработки этой задачи")
 
     print("[worker] loading Whisper...", flush=True)
     model = pipeline.load_whisper_model(WHISPER_MODEL, "cpu")
@@ -123,20 +150,40 @@ def main() -> None:
             raise
         print(f"[worker] warm-up diarize пропущен (тишина, ожидаемо): {e}", flush=True)
 
-    print("[worker] ready", flush=True)
     redis_client = jobqueue.sync_client()
 
+    # Восстанавливаем задачи, застрявшие в processing-списке Redis с прошлого (упавшего или
+    # убитого) запуска воркера — раньше, чем reconcile пометит их ошибкой в Postgres, чтобы
+    # успевшие восстановиться не помечались error и пересчитались с нуля вместо этого.
+    recovered = jobqueue.sync_recover_stuck_jobs(redis_client)
+    if recovered:
+        print(f"[worker] после рестарта нашёл {len(recovered)} незавершённых задач(и), верну в работу: {recovered}", flush=True)
+    db.sync_reconcile_interrupted(conn, "воркер перезапустился во время обработки этой задачи", keep_file_ids=recovered)
+
+    print("[worker] ready", flush=True)
+
     while True:
-        file_id = jobqueue.sync_pop_job(redis_client)
+        try:
+            file_id = jobqueue.sync_pop_job(redis_client)
+        except redis.exceptions.RedisError as e:
+            print(f"[worker] Redis временно недоступен ({e}), пробую снова через 2с", flush=True)
+            time.sleep(2)
+            continue
+
         if file_id is None:
-            continue  # обычный таймаут BLPOP — новых задач нет, просто снова ждём
+            continue  # обычный таймаут BLMOVE — новых задач нет, просто снова ждём
+
+        print(f"[worker] взял задачу {file_id}", flush=True)
         try:
             process_job(conn, model, device, file_id)
         except Exception as e:
+            print(f"[worker] задача {file_id} упала: {e}", flush=True)
             db.sync_set_status(
                 conn, file_id, status="error", stage=None,
                 error=f"{e}\n{traceback.format_exc()[-2000:]}",
             )
+        finally:
+            jobqueue.sync_ack_job(redis_client, file_id)
 
 
 if __name__ == "__main__":

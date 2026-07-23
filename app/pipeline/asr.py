@@ -28,17 +28,50 @@ def load_whisper_model(model_name: str, device: str):
     return model
 
 
+def _fallback_word_spans(raw_words, seg_start: float, seg_end: float):
+    """
+    Изредка word-level DTW-выравнивание faster-whisper не справляется с длинным сегментом и
+    отдаёт всем словам в нём ОДИНАКОВЫЙ таймкод (обычно = началу сегмента) -- сам текст при
+    этом декодирован верно, страдает только точность таймкодов. Реплика с start==end потом
+    никогда не подсвечивается при воспроизведении (t >= start и t < end одновременно
+    невозможны). Границы самого СЕГМЕНТА -- более фундаментальная часть декодирования
+    Whisper (спецтокены таймстемпов в основном цикле генерации), не зависящая от отдельного
+    шага word-level DTW-выравнивания, поэтому остаются осмысленными даже в этом случае.
+    Раскидываем слова по границам сегмента пропорционально длине слова -- грубое
+    приближение, но лучше вырожденного нуля.
+    """
+    total_chars = sum(len(w.word) for w in raw_words) or 1
+    span = max(seg_end - seg_start, 0.01)
+    cursor = seg_start
+    for w in raw_words:
+        share = len(w.word) / total_chars * span
+        yield w, cursor, cursor + share
+        cursor += share
+
+
 def _segments_to_dict(segments, offset: float = 0.0) -> List[dict]:
     # float(...): faster-whisper отдаёт start/end/probability как numpy.float64 -- сериализуется
     # в JSON и сегодня (numpy.float64 -- подкласс float), но не полагаемся на эту деталь
     # реализации молча, приводим к обычному Python float явно.
     result = []
     for seg in segments:
-        words = [
-            {"word": w.word, "start": float(w.start) + offset, "end": float(w.end) + offset, "probability": float(w.probability)}
-            for w in (seg.words or [])
-        ]
-        result.append({"start": float(seg.start) + offset, "end": float(seg.end) + offset, "text": seg.text, "words": words})
+        raw_words = seg.words or []
+        seg_start, seg_end = float(seg.start), float(seg.end)
+        degenerate = len(raw_words) > 1 and all(
+            float(w.start) == float(raw_words[0].start) and float(w.end) == float(raw_words[0].end)
+            for w in raw_words
+        )
+        if degenerate:
+            words = [
+                {"word": w.word, "start": w_start + offset, "end": w_end + offset, "probability": float(w.probability)}
+                for w, w_start, w_end in _fallback_word_spans(raw_words, seg_start, seg_end)
+            ]
+        else:
+            words = [
+                {"word": w.word, "start": float(w.start) + offset, "end": float(w.end) + offset, "probability": float(w.probability)}
+                for w in raw_words
+            ]
+        result.append({"start": seg_start + offset, "end": seg_end + offset, "text": seg.text, "words": words})
     return result
 
 

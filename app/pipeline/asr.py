@@ -48,8 +48,19 @@ def transcribe_with_model(model, wav_path: Path, language: str, on_progress=None
     целиком после завершения), сегменты здесь приходят генератором по мере распознавания —
     прогресс считается напрямую по позиции текущего сегмента в аудио, без хаков с перехватом
     tqdm (см. историю в git — так делали для openai-whisper, здесь это больше не нужно).
+
+    condition_on_previous_text=False: по умолчанию (True) текст каждого ~30-секундного окна
+    декодирования попадает в промпт следующего окна -- стоит один раз получить правдоподобную,
+    но галлюцинированную фразу, модель, затравленная своим же выводом, начинает сама себя
+    воспроизводить до конца файла (наблюдали на реальной 30-минутной записи: с некоторого
+    момента одно и то же предложение повторялось 15+ раз подряд до самого конца). Каждое
+    повторение -- чистый, беглый сегмент, поэтому compression_ratio_threshold/log_prob_threshold
+    его не ловят (они судят один сегмент, не повтор между сегментами).
     """
-    segments, info = model.transcribe(str(wav_path), language=language, word_timestamps=True)
+    segments, info = model.transcribe(
+        str(wav_path), language=language, word_timestamps=True,
+        condition_on_previous_text=False,
+    )
     duration = info.duration
     out_segments = []
     for seg in segments:
@@ -66,6 +77,13 @@ def transcribe_chunked(model, chunks: List[Tuple[Path, float]], language: str, o
     on_progress получает глобальный процент — прогресс внутри текущего куска масштабируется
     на долю "один кусок из N" (чанки и так режутся на примерно равные по длительности куски,
     см. split_audio_on_silence, поэтому равный вес на кусок — разумное приближение).
+
+    condition_on_previous_text=False (см. transcribe_with_model) -- не мешает initial_prompt:
+    тот засеивает только самое первое окно каждого вызова transcribe() независимо от этого
+    флага, который влияет лишь на окна 2+ внутри одного вызова. Кросс-чанковая связность
+    терминологии сохраняется, а риск самоусиливающегося повтора внутри длинного куска
+    (до CHUNK_MAX_SEC=720с, то есть ~24 окна) -- снят тем же способом, что и для обычного
+    (нечанкованного) пути.
     """
     all_segments = []
     prev_tail = ""
@@ -74,6 +92,7 @@ def transcribe_chunked(model, chunks: List[Tuple[Path, float]], language: str, o
         segments, info = model.transcribe(
             str(chunk_path), language=language, word_timestamps=True,
             initial_prompt=prev_tail or None,
+            condition_on_previous_text=False,
         )
         chunk_duration = info.duration
         chunk_text_tail = ""

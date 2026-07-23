@@ -17,7 +17,7 @@ const errorPanel = document.getElementById("error-panel");
 const STAGE_LABELS = {
   preprocess: "Препроцессинг аудио...",
   asr: "Распознавание речи (ASR)...",
-  diarization: "Диаризация (кто говорит)...",
+  diarization: "Диаризация...",
   postprocess: "Роли и экспорт...",
 };
 

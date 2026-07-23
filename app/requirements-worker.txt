@@ -6,11 +6,12 @@ torchaudio==2.4.0
 # (pipeline/ct2_convert.py, pipeline/_openai_to_hf.py)
 openai-whisper
 faster-whisper==1.2.1
-# ctranslate2==4.4.0, не более новая: TransformersConverter в 4.8.1 зовёт
-# from_pretrained(..., dtype=...), а этого кварга нет даже в transformers==4.53.3 (появился
-# позже) -- 4.4.0 использует старое имя torch_dtype=, которое transformers 4.53.x ещё
-# принимает.
-ctranslate2==4.4.0
+# ctranslate2==4.8.1 обязателен именно этой версии (не более старой) -- на базовом образе
+# с cuDNN9 (pytorch/pytorch:...-cudnn9-runtime) ctranslate2==4.4.0 падает в рантайме с
+# "libcudnn_ops_infer.so.8: cannot open shared object file" (тот бандлит только cuDNN8).
+# Конфликт этой версии с transformers~=4.53.0 (нужна кваргу dtype=, которого там ещё нет)
+# обойдён точечным monkey-patch в ct2_convert.py, только на время самой конвертации.
+ctranslate2==4.8.1
 # transformers: закреплена под то, что реально требует nemo_toolkit[asr]==2.6.0 (~=4.53.0);
 # одновременно достаточно старая, чтобы не тянуть torch.distributed.tensor.DTensor
 # (которого нет в закреплённом torch==2.4.0). Вся тройка (torch/transformers/ctranslate2/

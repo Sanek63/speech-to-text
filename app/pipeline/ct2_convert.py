@@ -68,8 +68,27 @@ def ensure_ct2_model(model_name: str) -> Path:
     model.save_pretrained(str(hf_dir))
 
     print(f"[ct2_convert] HF -> CTranslate2 формат ({hf_dir} -> {out_dir})...", flush=True)
-    converter = ctranslate2.converters.TransformersConverter(str(hf_dir))
-    converter.convert(str(out_dir), quantization="float16", force=True)
+    # ctranslate2.converters.transformers.TransformersConverter.load_model() всегда зовёт
+    # model_class.from_pretrained(path, dtype=...) -- этот кварг жёстко зашит в самом
+    # ctranslate2 (не зависит от версии transformers), а transformers~=4.53.0 (нужна для
+    # nemo_toolkit) его ещё не принимает (появился позже, в 5.x). Патчим только имя кварга
+    # на время самой конвертации -- ctranslate2==4.8.1 нужен целиком (не более старая версия)
+    # ради совместимости с cuDNN9 в рантайме, а не только ради конвертации.
+    import ctranslate2.converters.transformers as _ct2_transformers
+
+    _original_load_model = _ct2_transformers.TransformersConverter.load_model
+
+    def _patched_load_model(self, model_class, model_name_or_path, **kwargs):
+        if "dtype" in kwargs:
+            kwargs["torch_dtype"] = kwargs.pop("dtype")
+        return model_class.from_pretrained(model_name_or_path, **kwargs)
+
+    _ct2_transformers.TransformersConverter.load_model = _patched_load_model
+    try:
+        converter = ctranslate2.converters.TransformersConverter(str(hf_dir))
+        converter.convert(str(out_dir), quantization="float16", force=True)
+    finally:
+        _ct2_transformers.TransformersConverter.load_model = _original_load_model
 
     # На всякий случай: faster-whisper при отсутствии локального tokenizer.json в директории
     # модели тихо пытается скачать его с HF Hub (tokenizers.Tokenizer.from_pretrained(...)).

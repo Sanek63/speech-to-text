@@ -332,6 +332,20 @@ input[type="file"] {
   letter-spacing: 0.02em;
 }
 
+.follow-toggle {
+  margin-top: 1rem;
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.follow-toggle.active {
+  background: var(--teacher-bg);
+  color: var(--teacher);
+  border-color: var(--teacher);
+}
+
 .transcript {
   margin-top: 1.25rem;
   display: flex;
@@ -406,4 +420,23 @@ input[type="file"] {
   border-radius: var(--radius);
   font-size: 0.9rem;
   white-space: pre-wrap;
+}
+
+@media (max-width: 480px) {
+  /* Бейдж роли над текстом, а не сбоку -- на узком экране в ряд им уже тесно, и реплика
+     выше ростом даёт больше площади под тап пальцем */
+  .turn {
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.75rem 0.85rem;
+  }
+
+  .job-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .job-filename {
+    max-width: 100%;
+  }
 }

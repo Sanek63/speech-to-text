@@ -76,6 +76,16 @@ function renderTranscript() {
   }
 }
 
+const followToggle = document.getElementById("follow-toggle");
+let followEnabled = true;
+let lastActiveTurnId = null;
+
+followToggle.addEventListener("click", () => {
+  followEnabled = !followEnabled;
+  followToggle.classList.toggle("active", followEnabled);
+  followToggle.textContent = followEnabled ? "Следить за воспроизведением: вкл" : "Следить за воспроизведением: выкл";
+});
+
 player.addEventListener("timeupdate", () => {
   const t = player.currentTime;
   const activeTurn = turns.find((turn) => t >= turn.start && t < turn.end);
@@ -83,12 +93,23 @@ player.addEventListener("timeupdate", () => {
   document.querySelectorAll(".turn.active").forEach((el) => el.classList.remove("active"));
   document.querySelectorAll(".word.current").forEach((el) => el.classList.remove("current"));
 
-  if (!activeTurn) return;
+  if (!activeTurn) {
+    lastActiveTurnId = null;
+    return;
+  }
 
   const turnEl = transcriptEl.querySelector(`.turn[data-turn-id="${activeTurn.id}"]`);
   if (turnEl) {
     turnEl.classList.add("active");
-    turnEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    // Скроллим только когда реплика реально сменилась, а не на каждый тик timeupdate
+    // (несколько раз в секунду) -- иначе на мобильном почти непрерывная scroll-анимация
+    // мешает попасть тапом по другому блоку: палец промахивается, потому что контент
+    // уезжает прямо во время касания. followEnabled -- полностью отключаемо кнопкой ниже,
+    // чтобы можно было листать транскрипт, пока звук продолжает играть.
+    if (followEnabled && activeTurn.id !== lastActiveTurnId) {
+      turnEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    lastActiveTurnId = activeTurn.id;
 
     const activeWord = activeTurn.words.find((w) => t >= w.start && t < w.end);
     if (activeWord) {

@@ -31,10 +31,20 @@ def ensure_ct2_model(model_name: str) -> Path:
 
     checkpoint_path = _whisper_cache_dir() / f"{model_name}.pt"
     if not checkpoint_path.exists():
-        raise RuntimeError(
-            f"Не найден чекпоинт {checkpoint_path} — ожидается, что openai-whisper уже "
-            "скачал его через load_whisper_model() до вызова ensure_ct2_model()."
-        )
+        # На чистом model-cache (например, после docker volume rm) чекпоинта openai-whisper
+        # ещё нет -- скачиваем тем же, уже проверенным путём, что и сам пакет openai-whisper
+        # (Azure CDN, с контрольной суммой и повторным использованием при повторном вызове).
+        # Модель сразу отбрасываем -- нужен только сам факт наличия .pt-файла на диске для
+        # дальнейшей локальной конвертации ниже.
+        print(f"[ct2_convert] чекпоинт {checkpoint_path} не найден, скачиваю...", flush=True)
+        import whisper as _whisper_pkg
+
+        _openai_model = _whisper_pkg.load_model(model_name, device="cpu")
+        del _openai_model
+        if not checkpoint_path.exists():
+            raise RuntimeError(
+                f"openai-whisper должен был скачать {checkpoint_path}, но файла всё ещё нет."
+            )
 
     import ctranslate2
     from transformers import WhisperFeatureExtractor, WhisperProcessor, WhisperTokenizerFast

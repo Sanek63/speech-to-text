@@ -17,6 +17,19 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 STATIC_DIR = BASE_DIR / "static"
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles без явного Cache-Control браузеры кэшируют по своей эвристике и иногда
+    продолжают показывать старый app.js/index.html даже после обычного reload -- особенно
+    заметно на мобильных. no-cache (не no-store) не отключает кэш целиком, а лишь заставляет
+    браузер каждый раз идти к серверу за подтверждением через ETag/If-None-Match -- сервер в
+    ответ на неизменившийся файл всё равно быстро вернёт 304, статика не перекачивается."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def job_dir(file_id: str) -> Path:
     return DATA_DIR / file_id
 
@@ -137,4 +150,4 @@ async def audio(file_id: str):
     return FileResponse(candidates[0])
 
 
-app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+app.mount("/", NoCacheStaticFiles(directory=str(STATIC_DIR), html=True), name="static")
